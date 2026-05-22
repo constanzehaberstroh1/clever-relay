@@ -64,3 +64,6 @@ mem.out
 # ── Logs ──
 logs/
 *.log
+
+# ── Runtime PID/logs ──
+.run/
