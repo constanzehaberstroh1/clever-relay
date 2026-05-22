@@ -9,6 +9,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/salman/clever-relay/dataengine"
 )
@@ -260,6 +261,13 @@ func (s *SOCKS5Server) uplinkLoop(ctx context.Context, cs *clientSession) {
 // concurrent pending PULL requests to minimize downlink latency. When a PULL
 // returns with data, it's written to the browser and a new PULL is fired
 // immediately, ensuring there are always pending connections ready to receive.
+//
+// Flow control:
+//   HAS_MORE_DATA → immediate re-PULL (zero delay for 4K streaming)
+//   Data received → immediate re-PULL (keep the pipeline full)
+//   No data       → 500ms backoff (prevent GAS quota burning)
+//   CLOSED        → drain remaining data, cancel session
+//   Network error → 1s backoff + retry (resilience for Iran network)
 func (s *SOCKS5Server) downlinkLoop(ctx context.Context, cs *clientSession) {
 	const parallelPulls = 3 // Number of concurrent pending PULLs
 
@@ -284,19 +292,45 @@ func (s *SOCKS5Server) downlinkLoop(ctx context.Context, cs *clientSession) {
 		}()
 	}
 
+	// firePull launches a replacement PULL goroutine after an optional delay.
+	// A zero delay is used when HAS_MORE_DATA is signaled (4K streaming)
+	// or when data was received. A 500ms delay prevents quota burning on idle.
+	firePull := func(delay time.Duration) {
+		go func() {
+			if delay > 0 {
+				select {
+				case <-time.After(delay):
+				case <-ctx.Done():
+					return
+				}
+			}
+			pullPkt := &dataengine.TunnelPacket{
+				Version:   dataengine.ProtocolVersion,
+				Command:   dataengine.CmdPull,
+				SessionID: cs.id,
+				SeqNum:    cs.seqNum.Add(1) - 1,
+			}
+			resp, err := s.chunker.SendImmediate(pullPkt)
+			results <- pullResult{resp: resp, err: err}
+		}()
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case pr := <-results:
 			if pr.err != nil {
-				log.Printf("[socks5] PULL failed for %x: %v", cs.id[:4], pr.err)
-				cs.cancel()
-				return
+				// Network error — backoff and retry instead of killing the session.
+				// Iran's network can have transient disruptions; the browser's TCP
+				// connection is still alive, so we should keep trying.
+				log.Printf("[socks5] PULL error for %x: %v (retrying in 1s)", cs.id[:4], pr.err)
+				firePull(1 * time.Second)
+				continue
 			}
 
 			if pr.resp != nil {
-				// Check for session close
+				// Session closed by the exit node — drain and exit
 				if pr.resp.Status == "CLOSED" {
 					if len(pr.resp.Data) > 0 {
 						cs.conn.Write(pr.resp.Data)
@@ -305,7 +339,7 @@ func (s *SOCKS5Server) downlinkLoop(ctx context.Context, cs *clientSession) {
 					return
 				}
 
-				// Write data to browser
+				// Write received data to the browser
 				if len(pr.resp.Data) > 0 {
 					if _, err := cs.conn.Write(pr.resp.Data); err != nil {
 						log.Printf("[socks5] downlink write error for %x: %v", cs.id[:4], err)
@@ -313,19 +347,19 @@ func (s *SOCKS5Server) downlinkLoop(ctx context.Context, cs *clientSession) {
 						return
 					}
 				}
-			}
 
-			// Immediately fire a replacement PULL to keep the pipeline full
-			go func() {
-				pullPkt := &dataengine.TunnelPacket{
-					Version:   dataengine.ProtocolVersion,
-					Command:   dataengine.CmdPull,
-					SessionID: cs.id,
-					SeqNum:    cs.seqNum.Add(1) - 1,
+				// Speed control: determine the delay for the next PULL
+				if pr.resp.Status == "HAS_MORE_DATA" || len(pr.resp.Data) > 0 {
+					// Data is flowing — fire immediately for max throughput
+					firePull(0)
+				} else {
+					// Idle — backoff to avoid burning GAS daily quota
+					firePull(500 * time.Millisecond)
 				}
-				resp, err := s.chunker.SendImmediate(pullPkt)
-				results <- pullResult{resp: resp, err: err}
-			}()
+			} else {
+				// Nil response — backoff
+				firePull(500 * time.Millisecond)
+			}
 		}
 	}
 }
