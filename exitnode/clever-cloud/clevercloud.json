@@ -1,0 +1,18 @@
+{
+  "deploy": {
+    "type": "docker",
+    "dockerPort": 8080
+  },
+  "build": {
+    "dockerfilePath": "Dockerfile"
+  },
+  "hooks": {
+    "postDeploy": ""
+  },
+  "env": {
+    "PORT": "8080",
+    "RELAY_PSK": "",
+    "RELAY_PATH": "/relay",
+    "ADMIN_PASSWORD": ""
+  }
+}
