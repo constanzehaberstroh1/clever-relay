@@ -11,7 +11,7 @@ RUN npm install && npm run build
 # ──────────────────────────────────────────────────────────────────────────────
 # Stage 2: Build Go Binary
 # ──────────────────────────────────────────────────────────────────────────────
-FROM golang:1.22-alpine AS builder
+FROM golang:1.26-alpine AS builder
 RUN apk add --no-cache git ca-certificates
 
 WORKDIR /build
