@@ -1,13 +1,35 @@
 package main
 
 import (
+	"container/heap"
+	"context"
 	"fmt"
 	"log"
 	"net"
 	"sync"
 	"time"
-	"context"
+
+	"github.com/salman/clever-relay/dataengine"
 )
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Min-Heap for uplink packet reordering (sorted by SeqNum ascending)
+// ──────────────────────────────────────────────────────────────────────────────
+
+type packetHeap []*dataengine.TunnelPacket
+
+func (h packetHeap) Len() int            { return len(h) }
+func (h packetHeap) Less(i, j int) bool  { return h[i].SeqNum < h[j].SeqNum }
+func (h packetHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
+func (h *packetHeap) Push(x interface{}) { *h = append(*h, x.(*dataengine.TunnelPacket)) }
+func (h *packetHeap) Pop() interface{} {
+	old := *h
+	n := len(old)
+	item := old[n-1]
+	old[n-1] = nil // avoid memory leak
+	*h = old[:n-1]
+	return item
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Session represents a single logical tunnel connection (TCP or UDP).
@@ -36,9 +58,18 @@ type Session struct {
 
 	// Sequence tracking for ordered delivery
 	nextSeqNum uint32
+
+	// Uplink Reassembler – reorders out-of-order packets arriving from
+	// ScatterDispatch before writing to the destination TCP socket.
+	// Without this, parallel GAS requests cause packets to arrive at
+	// the exit node in random order, corrupting the upstream TCP stream.
+	upMu       sync.Mutex
+	upExpected uint32       // next expected SeqNum for uplink
+	upBuffer   packetHeap   // min-heap of buffered out-of-order packets
 }
 
-// WriteToTarget sends data to the destination TCP connection.
+// WriteToTarget sends data to the destination TCP connection (unordered).
+// Used for initial payload in TCP_CONNECT where ordering is guaranteed.
 func (s *Session) WriteToTarget(data []byte) (int, error) {
 	s.mu.Lock()
 	s.LastUsed = time.Now()
@@ -48,6 +79,43 @@ func (s *Session) WriteToTarget(data []byte) (int, error) {
 		return 0, fmt.Errorf("session %x: no TCP connection", s.ID[:4])
 	}
 	return s.TCPConn.Write(data)
+}
+
+// WriteOrderedToTarget inserts a packet into the uplink reassembler and
+// writes all contiguous in-order packets to the destination socket.
+//
+// This is CRITICAL for ScatterDispatch: packets arrive at the exit node
+// via different GAS scripts with varying latencies. Without reordering,
+// packet 3 could be written before packet 2, corrupting the TCP stream
+// and causing Connection Reset on the destination server.
+func (s *Session) WriteOrderedToTarget(pkt *dataengine.TunnelPacket) error {
+	s.upMu.Lock()
+	defer s.upMu.Unlock()
+
+	// Drop duplicates (already written)
+	if pkt.SeqNum < s.upExpected {
+		return nil
+	}
+
+	// Buffer this packet in the min-heap
+	heap.Push(&s.upBuffer, pkt)
+
+	// Drain all contiguous packets starting from upExpected
+	for s.upBuffer.Len() > 0 && s.upBuffer[0].SeqNum == s.upExpected {
+		nextPkt := heap.Pop(&s.upBuffer).(*dataengine.TunnelPacket)
+
+		s.mu.Lock()
+		s.LastUsed = time.Now()
+		s.mu.Unlock()
+
+		if s.TCPConn != nil && len(nextPkt.Payload) > 0 {
+			if _, err := s.TCPConn.Write(nextPkt.Payload); err != nil {
+				return err
+			}
+		}
+		s.upExpected++
+	}
+	return nil
 }
 
 // ReadFromBuffer drains the downstream buffer (data received from the

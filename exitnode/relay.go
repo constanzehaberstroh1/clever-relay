@@ -198,7 +198,10 @@ func (h *RelayHandler) execTCPConnect(pkt *dataengine.TunnelPacket) []byte {
 	return nil
 }
 
-// handleTCPData writes payload data to an existing TCP session.
+// handleTCPData writes payload data to an existing TCP session using the
+// uplink reassembler to guarantee in-order delivery. This is critical because
+// ScatterDispatch fires packets through different GAS scripts in parallel,
+// meaning packet N+1 may arrive before packet N at the exit node.
 func (h *RelayHandler) handleTCPData(w http.ResponseWriter, pkt *dataengine.TunnelPacket) {
 	session, ok := h.sessions.Get(pkt.SessionID)
 	if !ok {
@@ -208,7 +211,10 @@ func (h *RelayHandler) handleTCPData(w http.ResponseWriter, pkt *dataengine.Tunn
 	}
 
 	if len(pkt.Payload) > 0 {
-		if _, err := session.WriteToTarget(pkt.Payload); err != nil {
+		// Use the uplink reassembler instead of direct write.
+		// This buffers out-of-order packets in a Min-Heap and drains
+		// them to the TCP socket only when the sequence is contiguous.
+		if err := session.WriteOrderedToTarget(pkt); err != nil {
 			log.Printf("[relay] TCP_DATA write error for session %x: %v",
 				pkt.SessionID[:4], err)
 			h.sessions.Remove(pkt.SessionID)
@@ -218,7 +224,7 @@ func (h *RelayHandler) handleTCPData(w http.ResponseWriter, pkt *dataengine.Tunn
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// execTCPData is the batch version of handleTCPData.
+// execTCPData processes TCP data (for direct-to-server testing without GAS).
 func (h *RelayHandler) execTCPData(pkt *dataengine.TunnelPacket) []byte {
 	session, ok := h.sessions.Get(pkt.SessionID)
 	if !ok {
@@ -226,7 +232,7 @@ func (h *RelayHandler) execTCPData(pkt *dataengine.TunnelPacket) []byte {
 	}
 
 	if len(pkt.Payload) > 0 {
-		if _, err := session.WriteToTarget(pkt.Payload); err != nil {
+		if err := session.WriteOrderedToTarget(pkt); err != nil {
 			log.Printf("[relay] TCP_DATA write error: %v", err)
 			h.sessions.Remove(pkt.SessionID)
 		}

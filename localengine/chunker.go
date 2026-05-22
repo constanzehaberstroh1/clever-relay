@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -161,14 +163,36 @@ func (c *Chunker) parseResponse(body []byte) (*RelayResponse, error) {
 	return resp, nil
 }
 
+// ScatterDispatch fires envelopes in parallel through different GAS nodes.
+// Each goroutine has a 15-second timeout to prevent one slow GAS script
+// from blocking the entire flush pipeline (which would cause the queue
+// to explode and leak memory). If a packet times out, the browser's own
+// TCP retransmission mechanism will re-request the data.
 func (c *Chunker) ScatterDispatch(envelopes [][]byte) []error {
+	const scatterTimeout = 15 * time.Second
+
 	errs := make([]error, len(envelopes))
 	var wg sync.WaitGroup
 	for i, env := range envelopes {
 		wg.Add(1)
 		go func(idx int, data []byte) {
 			defer wg.Done()
-			_, errs[idx] = c.pool.Dispatch(data, false)
+
+			ctx, cancel := context.WithTimeout(context.Background(), scatterTimeout)
+			defer cancel()
+
+			done := make(chan struct{})
+			go func() {
+				_, errs[idx] = c.pool.Dispatch(data, false)
+				close(done)
+			}()
+
+			select {
+			case <-done:
+				// Dispatch completed normally
+			case <-ctx.Done():
+				errs[idx] = fmt.Errorf("scatter timeout (%v) for packet %d", scatterTimeout, idx)
+			}
 		}(i, env)
 	}
 	wg.Wait()
