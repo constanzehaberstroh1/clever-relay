@@ -360,12 +360,20 @@ func (a *AdminHandler) BroadcastLog(level, component, message string) {
 // ──────────────────────────────────────────────────────────────────────────────
 
 // registerSPA serves the embedded React dashboard from /admin/.
+//
+// There are two subtle issues that must be handled:
+//
+//  1. http.FileServer auto-redirects "/index.html" → "/" which creates
+//     an infinite loop with SPA fallback. We handle index.html explicitly
+//     by serving its content via http.ServeContent instead of FileServer.
+//
+//  2. Vite's build output uses absolute paths for assets (e.g. /assets/...).
+//     Since the dashboard is mounted at /admin/, we also register /assets/*
+//     at the root so the SPA can find its JS/CSS bundles.
 func (a *AdminHandler) registerSPA(mux *http.ServeMux) {
-	// Try to use the embedded filesystem
 	subFS, err := fs.Sub(dashboardFS, "dashboard/dist")
 	if err != nil {
 		log.Printf("[admin] No embedded dashboard found (build with 'bun run build' first): %v", err)
-		// Fallback: serve a simple redirect to the dev server
 		mux.HandleFunc("/admin/", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/html")
 			w.Write([]byte(`<!DOCTYPE html>
@@ -375,32 +383,82 @@ func (a *AdminHandler) registerSPA(mux *http.ServeMux) {
 <h1 style="color:#58a6ff">🛡️ Clever Relay Admin</h1>
 <p>Dashboard not built yet. Run:</p>
 <code style="background:#161b22;padding:8px 16px;border-radius:6px;display:block;margin:16px 0">cd frontend && bun run build</code>
-<p style="color:#8b949e">Then copy dist/ to exitnode/dashboard/dist/</p>
+<p style="color:#8b949e">Then rebuild the server binary.</p>
 <p style="margin-top:24px"><a href="/admin/api/metrics" style="color:#58a6ff">View Raw Metrics API →</a></p>
 </div></body></html>`))
 		})
 		return
 	}
 
+	// Read index.html once at startup for fast serving and to avoid
+	// http.FileServer's automatic /index.html → / redirect.
+	indexHTML, indexErr := fs.ReadFile(subFS, "index.html")
+	if indexErr != nil {
+		log.Printf("[admin] WARNING: index.html not found in embedded dashboard: %v", indexErr)
+	}
+
+	// serveIndex writes the cached index.html with correct headers.
+	serveIndex := func(w http.ResponseWriter, r *http.Request) {
+		if indexErr != nil {
+			http.Error(w, "Dashboard index.html not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Write(indexHTML)
+	}
+
 	fileServer := http.FileServer(http.FS(subFS))
 
+	// Serve /admin/* — the main SPA route
 	mux.HandleFunc("/admin/", func(w http.ResponseWriter, r *http.Request) {
-		// Strip /admin prefix for the file server
+		// Strip /admin prefix
 		path := strings.TrimPrefix(r.URL.Path, "/admin")
 		if path == "" || path == "/" {
-			path = "/index.html"
+			serveIndex(w, r)
+			return
 		}
 
-		// Try to serve the file. If not found, serve index.html (SPA routing).
-		if _, err := fs.Stat(subFS, strings.TrimPrefix(path, "/")); err != nil {
-			// SPA fallback: serve index.html for client-side routing
-			r.URL.Path = "/index.html"
-		} else {
+		// Try to serve the static file from the embedded FS
+		cleanPath := strings.TrimPrefix(path, "/")
+		if _, statErr := fs.Stat(subFS, cleanPath); statErr == nil {
+			// File exists — serve it (adjust path for FileServer)
 			r.URL.Path = path
+			fileServer.ServeHTTP(w, r)
+			return
 		}
 
-		fileServer.ServeHTTP(w, r)
+		// File not found → SPA fallback (serve index.html)
+		serveIndex(w, r)
 	})
+
+	// Also serve /assets/* at the root level because Vite's build output
+	// uses absolute paths like "/assets/index-xxx.js" in index.html.
+	// Without this, the browser would 404 on all JS/CSS bundles.
+	mux.HandleFunc("/assets/", func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		if _, statErr := fs.Stat(subFS, path); statErr == nil {
+			r.URL.Path = "/" + path
+			fileServer.ServeHTTP(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	})
+
+	// Serve /favicon.svg and /icons.svg at root too (referenced by index.html)
+	for _, name := range []string{"favicon.svg", "icons.svg"} {
+		staticName := name
+		mux.HandleFunc("/"+staticName, func(w http.ResponseWriter, r *http.Request) {
+			data, err := fs.ReadFile(subFS, staticName)
+			if err != nil {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "image/svg+xml")
+			w.Header().Set("Cache-Control", "public, max-age=86400")
+			w.Write(data)
+		})
+	}
 }
 
 // ServeDashboard is kept for backward compatibility.
