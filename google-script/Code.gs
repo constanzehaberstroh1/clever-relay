@@ -29,7 +29,7 @@
  * Your Clever Cloud exit node URL.
  * Change this to your actual deployment URL.
  */
-var RELAY_URL = "https://your-app.cleverapps.io/relay";
+var RELAY_URL = "https://app-a6e79a9d-ddf5-49cd-a13a-ad8cee87456b.cleverapps.io/relay";
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Utility: Case-Insensitive Header Reader
@@ -72,6 +72,16 @@ function getHeaderCaseInsensitive(headers, name) {
  */
 function doPost(e) {
   try {
+    // ==========================================
+    // Intelligent Router: if the client sends ?mode=batch,
+    // delegate to the parallel fetchAll handler.
+    // GAS always calls doPost() for every POST — doBatchPost
+    // is never called directly by the runtime.
+    // ==========================================
+    if (e.parameter && e.parameter.mode === 'batch') {
+      return doBatchPost(e);
+    }
+
     var payload = e.postData.contents;
 
     // Build the request options

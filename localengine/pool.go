@@ -68,13 +68,24 @@ func NewGASPool(urls []string, transport *H2Transport) *GASPool {
 				if len(via) >= 10 {
 					return errors.New("too many redirects")
 				}
-				// Preserve POST method on Google 302 redirects
-				if len(via) > 0 && via[0].Method == http.MethodPost {
+				// Google Apps Script uses 302 redirects to route POST requests
+				// to the execution endpoint. Go's http.Client converts POST→GET
+				// on 302 by default, causing a 405 at the final URL.
+				//
+				// We must preserve: method, body, Content-Type, and User-Agent
+				// across the ENTIRE redirect chain.
+				orig := via[0]
+				if orig.Method == http.MethodPost {
 					req.Method = http.MethodPost
-					if via[0].GetBody != nil {
-						body, _ := via[0].GetBody()
-						req.Body = body
+					if orig.GetBody != nil {
+						body, err := orig.GetBody()
+						if err == nil {
+							req.Body = body
+						}
 					}
+					// Preserve critical headers that Go strips on redirect
+					req.Header.Set("Content-Type", orig.Header.Get("Content-Type"))
+					req.Header.Set("User-Agent", orig.Header.Get("User-Agent"))
 				}
 				return nil
 			},
@@ -136,7 +147,7 @@ func (p *GASPool) Dispatch(data []byte, isBatch bool) ([]byte, error) {
 func (p *GASPool) dispatchToNode(node *GASNode, data []byte, isBatch bool) ([]byte, error) {
 	url := node.URL
 	if isBatch {
-		url += "?batch=1"
+		url += "?mode=batch"
 	}
 
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(data))
@@ -144,7 +155,11 @@ func (p *GASPool) dispatchToNode(node *GASNode, data []byte, isBatch bool) ([]by
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
 
-	req.Header.Set("Content-Type", "application/octet-stream")
+	// IMPORTANT: Use text/plain, not application/octet-stream!
+	// The payload is Base64-encoded text. GAS's doPost only processes
+	// POST requests with text-compatible Content-Types. Sending
+	// octet-stream causes a 405 on some ISPs/proxy redirect chains.
+	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 
 	// Set GetBody for redirect preservation

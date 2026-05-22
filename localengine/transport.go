@@ -88,6 +88,8 @@ func NewH2Transport() *H2Transport {
 
 // dialWithCleanIP overrides DNS resolution for Google domains, routing
 // connections through the fastest IP discovered by the background scanner.
+// We set the TLS ServerName to the original hostname so certificate
+// verification succeeds even when connecting to a raw IP.
 func (h *H2Transport) dialWithCleanIP(ctx context.Context, network, addr string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -102,6 +104,11 @@ func (h *H2Transport) dialWithCleanIP(ctx context.Context, network, addr string)
 			// Pick a random IP from the top 3 to distribute load
 			chosenIP := bestIPs[rand.Intn(len(bestIPs))]
 			addr = net.JoinHostPort(chosenIP, port)
+
+			// Preserve the original hostname for TLS certificate verification.
+			// Without this, the handshake fails when connecting to a raw IP
+			// because the cert is issued for *.google.com, not the IP.
+			h.transport.TLSClientConfig.ServerName = host
 		}
 	}
 
