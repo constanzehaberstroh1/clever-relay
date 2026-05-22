@@ -1,8 +1,7 @@
 package localengine
 
 import (
-	"bytes"
-	"io"
+	"encoding/base64"
 	"log"
 	"strings"
 	"sync"
@@ -58,7 +57,12 @@ func (c *Chunker) SendImmediate(pkt *dataengine.TunnelPacket) (*RelayResponse, e
 	if err != nil {
 		return nil, err
 	}
-	body, err := c.pool.Dispatch(sealed, false)
+
+	// Base64-encode so GAS's postData.contents doesn't corrupt the binary.
+	// The exit node will Base64-decode before decryption.
+	b64Data := base64.StdEncoding.EncodeToString(sealed)
+
+	body, err := c.pool.Dispatch([]byte(b64Data), false)
 	if err != nil {
 		return nil, err
 	}
@@ -96,14 +100,27 @@ func (c *Chunker) flush() {
 	c.queueSz = 0
 	c.mu.Unlock()
 
-	batch, err := c.proto.SealBatch(pkts)
-	if err != nil {
-		log.Printf("[chunker] seal batch error: %v", err)
-		return
+	// Seal each packet individually and Base64-encode for GAS safety.
+	// Since fetchAll fires separate requests, each packet goes through
+	// its own GAS → exit node round-trip via ScatterDispatch.
+	var envelopes [][]byte
+	for _, pkt := range pkts {
+		sealed, err := c.proto.Seal(pkt)
+		if err != nil {
+			log.Printf("[chunker] seal error: %v", err)
+			continue
+		}
+		b64Data := base64.StdEncoding.EncodeToString(sealed)
+		envelopes = append(envelopes, []byte(b64Data))
 	}
-	_, err = c.pool.Dispatch(batch, true)
-	if err != nil {
-		log.Printf("[chunker] dispatch error: %v", err)
+
+	if len(envelopes) > 0 {
+		errs := c.ScatterDispatch(envelopes)
+		for i, err := range errs {
+			if err != nil {
+				log.Printf("[chunker] scatter dispatch[%d] error: %v", i, err)
+			}
+		}
 	}
 }
 
@@ -114,23 +131,30 @@ func (c *Chunker) parseResponse(body []byte) (*RelayResponse, error) {
 	content := string(body)
 	resp := &RelayResponse{Status: "OK"}
 
+	// GAS prefixes the response with "STATUS=...\n" when the exit node
+	// sets the X-Session-Status header. Parse and strip it.
 	if strings.HasPrefix(content, "STATUS=") {
 		parts := strings.SplitN(content, "\n", 2)
 		resp.Status = strings.TrimPrefix(parts[0], "STATUS=")
 		if len(parts) > 1 && len(parts[1]) > 0 {
-			pkt, err := c.proto.Open([]byte(parts[1]))
-			if err != nil {
-				resp.Data = []byte(parts[1])
-			} else {
-				resp.Data = pkt.Payload
-			}
+			content = parts[1]
+		} else {
+			return resp, nil
 		}
-		return resp, nil
 	}
 
-	pkt, err := c.proto.Open(body)
+	// The exit node Base64-encodes all sealed envelopes.
+	// Decode from Base64, then decrypt.
+	raw, err := base64.StdEncoding.DecodeString(content)
 	if err != nil {
-		resp.Data = body
+		// Not valid Base64 — treat as raw data (direct-to-server testing)
+		raw = []byte(content)
+	}
+
+	pkt, err := c.proto.Open(raw)
+	if err != nil {
+		// Decryption failed — return raw data for debugging
+		resp.Data = raw
 		return resp, nil
 	}
 	resp.Data = pkt.Payload
@@ -149,8 +173,4 @@ func (c *Chunker) ScatterDispatch(envelopes [][]byte) []error {
 	}
 	wg.Wait()
 	return errs
-}
-
-func sealedReader(data []byte) io.Reader {
-	return bytes.NewReader(data)
 }

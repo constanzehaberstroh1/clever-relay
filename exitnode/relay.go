@@ -56,6 +56,11 @@ func NewRelayHandler(psk []byte, ss *SessionStore) (*RelayHandler, error) {
 
 // HandleRelay is the HTTP handler for POST /relay. It reads the encrypted
 // body, decrypts it, and dispatches commands to the appropriate session.
+//
+// IMPORTANT: All data arriving from Google Apps Script is Base64-encoded
+// because GAS's postData.contents corrupts raw binary (non-UTF-8 bytes
+// are replaced with U+FFFD). The client Base64-encodes before sending,
+// and this handler decodes before decryption.
 func (h *RelayHandler) HandleRelay(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		// Silent Drop: don't reveal that this endpoint exists
@@ -63,8 +68,8 @@ func (h *RelayHandler) HandleRelay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read the request body using a pooled buffer for GC pressure reduction
-	body, err := io.ReadAll(io.LimitReader(r.Body, MaxRequestBody))
+	// Read the request body
+	rawBody, err := io.ReadAll(io.LimitReader(r.Body, MaxRequestBody))
 	r.Body.Close()
 	if err != nil {
 		// Silent Drop
@@ -72,24 +77,26 @@ func (h *RelayHandler) HandleRelay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(body) == 0 {
+	if len(rawBody) == 0 {
 		http.NotFound(w, r)
 		return
 	}
 
-	// Check if this is a batch or single packet
-	// Try batch first (length-prefixed envelopes)
-	isBatch := r.Header.Get("X-Batch") == "1"
-
-	if isBatch {
-		h.handleBatch(w, body)
-	} else {
-		h.handleSingle(w, body)
+	// Decode from Base64. The client and GAS relay encode all binary data
+	// as Base64 to prevent UTF-8 corruption in Google's JavaScript engine.
+	body, err := base64.StdEncoding.DecodeString(string(rawBody))
+	if err != nil {
+		// Not valid Base64 — could be a DPI probe or direct binary test.
+		// Try raw bytes as fallback (for direct-to-server testing without GAS).
+		body = rawBody
 	}
-}
 
-// handleSingle processes a single encrypted envelope.
-func (h *RelayHandler) handleSingle(w http.ResponseWriter, body []byte) {
+	// Note: We do NOT have a separate handleBatch path here. When the GAS
+	// script uses UrlFetchApp.fetchAll(), it fires N separate HTTP requests
+	// in parallel — each one hits this handler independently. Go's HTTP
+	// server handles them concurrently via goroutines, so no special batch
+	// logic is needed on the server side.
+
 	pkt, err := h.proto.Open(body)
 	if err != nil {
 		// Silent Drop: DPI probe or wrong key – return 404 to look like
@@ -99,51 +106,6 @@ func (h *RelayHandler) handleSingle(w http.ResponseWriter, body []byte) {
 	}
 
 	h.dispatch(w, pkt)
-}
-
-// handleBatch processes a batch of length-prefixed encrypted envelopes.
-func (h *RelayHandler) handleBatch(w http.ResponseWriter, body []byte) {
-	pkts, err := h.proto.OpenBatch(body)
-	if err != nil {
-		// Silent Drop
-		http.NotFound(w, nil)
-		return
-	}
-
-	// Process each packet. Collect responses for the batch.
-	var responses [][]byte
-	for _, pkt := range pkts {
-		resp := h.dispatchCollect(pkt)
-		responses = append(responses, resp)
-	}
-
-	// Seal and return the responses as a batch
-	var respPkts []*dataengine.TunnelPacket
-	for i, resp := range responses {
-		if len(resp) > 0 {
-			respPkts = append(respPkts, &dataengine.TunnelPacket{
-				Version:   dataengine.ProtocolVersion,
-				Command:   dataengine.CmdTCPData,
-				SessionID: pkts[i].SessionID,
-				SeqNum:    pkts[i].SeqNum,
-				Payload:   resp,
-			})
-		}
-	}
-
-	if len(respPkts) > 0 {
-		sealed, err := h.proto.SealBatch(respPkts)
-		if err != nil {
-			log.Printf("[relay] failed to seal batch response: %v", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Header().Set("X-Batch", "1")
-		w.Write(sealed)
-	} else {
-		w.WriteHeader(http.StatusNoContent)
-	}
 }
 
 // dispatch processes a single packet and writes the response to w.
@@ -163,23 +125,6 @@ func (h *RelayHandler) dispatch(w http.ResponseWriter, pkt *dataengine.TunnelPac
 		log.Printf("[relay] unknown command 0x%02x from session %x",
 			pkt.Command, pkt.SessionID[:4])
 		w.WriteHeader(http.StatusNoContent)
-	}
-}
-
-// dispatchCollect processes a single packet and returns response data (for batches).
-func (h *RelayHandler) dispatchCollect(pkt *dataengine.TunnelPacket) []byte {
-	switch pkt.Command {
-	case dataengine.CmdTCPConnect:
-		return h.execTCPConnect(pkt)
-	case dataengine.CmdTCPData:
-		return h.execTCPData(pkt)
-	case dataengine.CmdTCPClose:
-		h.sessions.Remove(pkt.SessionID)
-		return nil
-	case dataengine.CmdUDPData:
-		return h.execUDPData(pkt)
-	default:
-		return nil
 	}
 }
 
@@ -495,9 +440,21 @@ func (h *RelayHandler) backgroundReader(session *Session) {
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Response helpers
+//
+// CRITICAL: All responses MUST be Base64-encoded before writing to the HTTP
+// response body. Google Apps Script's response.getContentText() interprets
+// the body as a UTF-8 string — any byte that isn't valid UTF-8 is replaced
+// with U+FFFD (replacement character), permanently corrupting the ciphertext
+// and causing ErrAuthFailed (Silent Drop) on the client.
+//
+// The encoding chain:
+//   Exit Node:  Seal(pkt) → Base64(sealed) → HTTP Response body
+//   GAS:        response.getContentText() → safe text → client
+//   Client:     Base64.Decode(text) → Open(sealed) → TunnelPacket
 // ──────────────────────────────────────────────────────────────────────────────
 
-// sendResponse encrypts a TunnelPacket and writes it to the HTTP response.
+// sendResponse encrypts a TunnelPacket and writes it as Base64 to the HTTP
+// response, ensuring safe transit through Google Apps Script.
 func (h *RelayHandler) sendResponse(w http.ResponseWriter, pkt *dataengine.TunnelPacket) {
 	sealed, err := h.proto.Seal(pkt)
 	if err != nil {
@@ -506,13 +463,15 @@ func (h *RelayHandler) sendResponse(w http.ResponseWriter, pkt *dataengine.Tunne
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Write(sealed)
+	// Base64-encode to survive getContentText() in GAS
+	b64Data := base64.StdEncoding.EncodeToString(sealed)
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Write([]byte(b64Data))
 }
 
 // sendDataResponse sends downstream data with a session status header.
-// The data is Base64-encoded and wrapped in an encrypted envelope for
-// compatibility with GAS response handling.
+// The encrypted envelope is Base64-encoded for safe passage through GAS.
 func (h *RelayHandler) sendDataResponse(w http.ResponseWriter, sessionID [16]byte, seqNum uint32, data []byte, status string) {
 	pkt := &dataengine.TunnelPacket{
 		Version:   dataengine.ProtocolVersion,
@@ -529,12 +488,10 @@ func (h *RelayHandler) sendDataResponse(w http.ResponseWriter, sessionID [16]byt
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/octet-stream")
+	// Base64-encode to survive getContentText() in GAS
+	b64Data := base64.StdEncoding.EncodeToString(sealed)
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("X-Session-Status", status)
-
-	// Also provide a Base64 version for GAS compatibility
-	w.Header().Set("X-Data-Encoding", "binary")
-	_ = base64.StdEncoding // available if needed by GAS relay
-
-	w.Write(sealed)
+	w.Write([]byte(b64Data))
 }

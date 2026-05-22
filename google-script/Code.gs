@@ -5,6 +5,10 @@
  * the exit node (Clever Cloud). It performs ZERO processing on the encrypted
  * payload — it simply forwards HTTP POST bodies in both directions.
  *
+ * IMPORTANT: All data is Base64-encoded by the client/server to prevent
+ * corruption from getContentText()'s UTF-8 interpretation. This script
+ * does NOT need to decode or encode anything — just forwards text as-is.
+ *
  * Deployment:
  * 1. Go to https://script.google.com
  * 2. Create a new project, paste this code
@@ -28,6 +32,31 @@
 var RELAY_URL = "https://your-app.cleverapps.io/relay";
 
 // ══════════════════════════════════════════════════════════════════════════════
+// Utility: Case-Insensitive Header Reader
+//
+// HTTP headers may be lowercased by load balancers (e.g., Sōzu at Clever Cloud)
+// or proxies. JavaScript's object property access is case-sensitive, so we must
+// search headers case-insensitively to avoid undefined values.
+// ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Reads an HTTP header value case-insensitively.
+ *
+ * @param {Object} headers - The headers object from response.getHeaders()
+ * @param {string} name - The header name to search for (case-insensitive)
+ * @returns {string} The header value, or empty string if not found
+ */
+function getHeaderCaseInsensitive(headers, name) {
+  var lowerName = name.toLowerCase();
+  for (var key in headers) {
+    if (key.toLowerCase() === lowerName) {
+      return headers[key];
+    }
+  }
+  return '';
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 // Main POST Handler
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -35,26 +64,21 @@ var RELAY_URL = "https://your-app.cleverapps.io/relay";
  * doPost receives encrypted tunnel traffic from the local client and
  * forwards it to the Clever Cloud exit node.
  *
- * The client sends encrypted binary data in the POST body. This script
- * does not decrypt, inspect, or modify the data in any way.
- *
- * Supports two modes:
- * 1. Single relay: One encrypted envelope → forwarded as-is
- * 2. Batch relay: Multiple envelopes → forwarded with X-Batch header
+ * The client sends Base64-encoded encrypted data in the POST body. This script
+ * does not decrypt, inspect, or modify the data in any way — it is a pure relay.
  *
  * @param {Object} e - The event object from Apps Script
- * @returns {TextOutput} The exit node's response (encrypted)
+ * @returns {TextOutput} The exit node's response (Base64-encoded encrypted data)
  */
 function doPost(e) {
   try {
     var payload = e.postData.contents;
-    var isBatch = e.parameter.batch === "1";
 
     // Build the request options
     var options = {
       'method': 'post',
       'payload': payload,
-      'contentType': 'application/octet-stream',
+      'contentType': 'text/plain',
       'muteHttpExceptions': true,
       'followRedirects': true,
       'validateHttpsCertificates': true,
@@ -62,13 +86,8 @@ function doPost(e) {
       // The exit node uses Time-Aware Preemption (45s) to stay within this.
     };
 
-    // Add batch header if needed
-    var headers = {};
-    if (isBatch) {
-      headers['X-Batch'] = '1';
-    }
-
     // Forward any custom headers from the client
+    var headers = {};
     if (e.parameter.cmd) {
       headers['X-Tunnel-Cmd'] = e.parameter.cmd;
     }
@@ -80,22 +99,25 @@ function doPost(e) {
     // Forward to Clever Cloud
     var response = UrlFetchApp.fetch(RELAY_URL, options);
 
-    // Build the response back to the client
-    var output = ContentService.createTextOutput(response.getContentText());
-    output.setMimeType(ContentService.MimeType.TEXT);
+    // Read the response body (safe text — all data is Base64-encoded by the server)
+    var responseText = response.getContentText();
 
-    // Preserve the session status header from the exit node
-    // Note: GAS cannot set custom response headers, so we encode
-    // the status in the response body prefix.
-    var sessionStatus = response.getHeaders()['X-Session-Status'] || '';
+    // Read the session status header case-insensitively.
+    // Load balancers like Sōzu may lowercase headers (x-session-status).
+    var respHeaders = response.getHeaders();
+    var sessionStatus = getHeaderCaseInsensitive(respHeaders, 'X-Session-Status');
+
+    // Build the response back to the client
     if (sessionStatus) {
-      // Prepend status as a simple protocol: "STATUS:data"
-      output = ContentService.createTextOutput(
-        "STATUS=" + sessionStatus + "\n" + response.getContentText()
-      );
+      // Prepend status as a simple protocol: "STATUS=value\ndata"
+      // The client parses this to detect HAS_MORE_DATA and CLOSED signals.
+      return ContentService.createTextOutput(
+        "STATUS=" + sessionStatus + "\n" + responseText
+      ).setMimeType(ContentService.MimeType.TEXT);
     }
 
-    return output;
+    return ContentService.createTextOutput(responseText)
+      .setMimeType(ContentService.MimeType.TEXT);
 
   } catch (error) {
     // Log the error for debugging via Apps Script Logs
@@ -104,7 +126,7 @@ function doPost(e) {
     // Return error info to the client so it can circuit-break this script
     return ContentService.createTextOutput(
       "STATUS=ERROR\n" + error.toString()
-    );
+    ).setMimeType(ContentService.MimeType.TEXT);
   }
 }
 
@@ -113,9 +135,14 @@ function doPost(e) {
 // ══════════════════════════════════════════════════════════════════════════════
 
 /**
- * doPost handler for batch mode. When the client sends multiple envelopes
+ * doBatchPost handles batch mode. When the client sends multiple envelopes
  * packed into a JSON array, this function uses UrlFetchApp.fetchAll() to
  * fire them in parallel to the exit node.
+ *
+ * IMPORTANT: fetchAll() sends N separate HTTP requests to the exit node.
+ * Each request is processed independently by the exit node's HTTP server
+ * (not as a single batch). This is by design — Go's goroutines handle
+ * the concurrency on the server side.
  *
  * The client activates this mode by sending:
  *   POST ?mode=batch
@@ -129,16 +156,17 @@ function doBatchPost(e) {
     var envelopes = JSON.parse(e.postData.contents);
 
     if (!Array.isArray(envelopes) || envelopes.length === 0) {
-      return ContentService.createTextOutput("STATUS=ERROR\nEmpty batch");
+      return ContentService.createTextOutput("STATUS=ERROR\nEmpty batch")
+        .setMimeType(ContentService.MimeType.TEXT);
     }
 
-    // Build fetchAll request array
+    // Build fetchAll request array — each envelope becomes a separate POST
     var requests = envelopes.map(function(envelope) {
       return {
         'url': RELAY_URL,
         'method': 'post',
         'payload': envelope,
-        'contentType': 'application/octet-stream',
+        'contentType': 'text/plain',
         'muteHttpExceptions': true,
         'followRedirects': true,
         'validateHttpsCertificates': true,
@@ -148,9 +176,10 @@ function doBatchPost(e) {
     // Fire all requests in parallel!
     var responses = UrlFetchApp.fetchAll(requests);
 
-    // Aggregate responses
+    // Aggregate responses with case-insensitive header reading
     var results = responses.map(function(resp, index) {
-      var status = resp.getHeaders()['X-Session-Status'] || 'OK';
+      var respHeaders = resp.getHeaders();
+      var status = getHeaderCaseInsensitive(respHeaders, 'X-Session-Status') || 'OK';
       return {
         'index': index,
         'status': status,
@@ -166,7 +195,7 @@ function doBatchPost(e) {
     Logger.log("Batch relay error: " + error.toString());
     return ContentService.createTextOutput(
       "STATUS=ERROR\n" + error.toString()
-    );
+    ).setMimeType(ContentService.MimeType.TEXT);
   }
 }
 
