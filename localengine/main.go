@@ -70,6 +70,10 @@ func main() {
 		log.Fatalf("Protocol init error: %v", err)
 	}
 
+	// Global async logger (shared across all modules)
+	logger := dataengine.NewLogger(dataengine.DefaultQueueSize, dataengine.DefaultRingSize)
+	logger.AddSink(dataengine.NewConsoleSink(true))
+
 	// Phase 5: H2Transport now starts a background IP scanner automatically
 	transport := NewH2Transport()
 	pool := NewGASPool(urls, transport)
@@ -77,6 +81,12 @@ func main() {
 
 	// Start the SOCKS5 server
 	socks := NewSOCKS5Server(*socksAddr, proto, chunker, pool)
+
+	logger.Info("startup", "Clever Relay – Local Client starting...")
+	logger.Infof("startup", "SOCKS5 listening on %s", *socksAddr)
+	logger.Infof("startup", "GAS Pool: %d scripts", len(urls))
+	logger.Info("startup", "Scanner: Active (5 min interval)")
+	logger.Info("startup", "Polling: Reverse (3 parallel)")
 
 	log.Printf("╔══════════════════════════════════════════════════╗")
 	log.Printf("║     Clever Relay – Local Client (Phase 5)       ║")
@@ -99,11 +109,13 @@ func main() {
 	signal.Notify(done, os.Interrupt, syscall.SIGTERM)
 	<-done
 
+	logger.Info("shutdown", "Shutting down local engine...")
 	log.Println("Shutting down local engine...")
 	socks.Close()
 	chunker.Close()
 	pool.Close()
 	transport.Close() // Phase 5: stops the IP scanner
+	logger.Close()    // Drain remaining logs to sinks
 	log.Println("Goodbye.")
 }
 

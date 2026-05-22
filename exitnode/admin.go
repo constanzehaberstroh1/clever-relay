@@ -232,7 +232,7 @@ func (a *AdminHandler) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}{
 		System:   CollectSystemMetrics(),
 		Sessions: a.sessions.Count(),
-		LogCount: a.logger.buffer.Count(),
+		LogCount: a.logger.Count(),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
