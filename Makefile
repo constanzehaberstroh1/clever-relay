@@ -59,13 +59,13 @@ RESET         := \033[0m
 # ── Default Target ────────────────────────────────────────────────────────────
 .DEFAULT_GOAL := all
 
-.PHONY: all exitnode localengine desktop frontend frontend-desktop \
+.PHONY: all exitnode localengine desktop frontend frontend-panel frontend-desktop \
         test lint clean docker release help deps \
         cross-linux cross-windows cross-darwin
 
 # ── Main Targets ──────────────────────────────────────────────────────────────
 
-all: banner deps frontend exitnode localengine  ## Build everything
+all: banner deps frontend frontend-panel exitnode localengine  ## Build everything
 	@printf "$(GREEN)$(BOLD)✓ All builds complete. Binaries in ./bin/$(RESET)\n"
 	@ls -lh $(BIN_DIR)/
 
@@ -98,6 +98,12 @@ frontend:  ## Build the admin dashboard (React → exitnode/dashboard/dist)
 	@cd $(PROJECT_ROOT)/frontend && $(BUN) run build
 	@printf "$(GREEN)  ✓ Dashboard built → exitnode/dashboard/dist/$(RESET)\n"
 
+frontend-panel:  ## Build the client admin panel (React → localengine/panel/dist)
+	@printf "$(CYAN)▸ Building client admin panel frontend...$(RESET)\n"
+	@cd $(PROJECT_ROOT)/client-panel && $(BUN) install --frozen-lockfile 2>/dev/null || $(BUN) install
+	@cd $(PROJECT_ROOT)/client-panel && $(BUN) run build
+	@printf "$(GREEN)  ✓ Client panel built → localengine/panel/dist/$(RESET)\n"
+
 frontend-desktop:  ## Build the desktop Wails frontend
 	@printf "$(CYAN)▸ Building desktop frontend...$(RESET)\n"
 	@cd $(PROJECT_ROOT)/desktop/frontend && $(NPM) install --silent 2>/dev/null || $(NPM) install
@@ -117,7 +123,7 @@ exitnode: $(BIN_DIR) frontend  ## Build the Clever Cloud exit node server
 		-o $(BIN_DIR)/$(EXITNODE_BIN) .
 	@printf "$(GREEN)  ✓ $(BIN_DIR)/$(EXITNODE_BIN) ($(GOOS)/$(GOARCH))$(RESET)\n"
 
-localengine: $(BIN_DIR)  ## Build the local SOCKS5 client engine
+localengine: $(BIN_DIR) frontend-panel  ## Build the local SOCKS5 client engine
 	@printf "$(CYAN)▸ Building local client engine...$(RESET)\n"
 	@cd $(PROJECT_ROOT)/localengine && \
 		CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS) GOARCH=$(GOARCH) \
@@ -208,6 +214,7 @@ clean:  ## Remove all build artifacts
 	@printf "$(CYAN)▸ Cleaning build artifacts...$(RESET)\n"
 	@rm -rf $(BIN_DIR)
 	@rm -rf $(PROJECT_ROOT)/exitnode/dashboard/dist
+	@rm -rf $(PROJECT_ROOT)/localengine/panel/dist
 	@rm -rf $(PROJECT_ROOT)/desktop/build/bin
 	@cd $(PROJECT_ROOT)/dataengine && $(GO) clean -cache -testcache 2>/dev/null || true
 	@cd $(PROJECT_ROOT)/exitnode && $(GO) clean -cache 2>/dev/null || true

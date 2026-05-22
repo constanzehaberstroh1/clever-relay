@@ -425,6 +425,11 @@ func (p *PanelServer) handleWSLogs(ws *websocket.Conn) {
 
 // broadcastLogs subscribes to the logger stream and pushes entries to all
 // connected WebSocket clients.
+//
+// Critical optimization: we snapshot the client list under a short lock,
+// then write to each client OUTSIDE the lock with a write deadline.
+// This prevents a slow/sleeping browser tab from blocking log delivery
+// to all other clients (head-of-line blocking).
 func (p *PanelServer) broadcastLogs() {
 	stream := p.logger.Stream()
 	for entry := range stream {
@@ -436,14 +441,26 @@ func (p *PanelServer) broadcastLogs() {
 			continue
 		}
 
+		// 1. Snapshot the client list under a brief lock
 		p.wsMu.Lock()
+		conns := make([]*websocket.Conn, 0, len(p.wsConns))
 		for ws := range p.wsConns {
-			if _, err := ws.Write(data); err != nil {
-				ws.Close()
-				delete(p.wsConns, ws)
-			}
+			conns = append(conns, ws)
 		}
 		p.wsMu.Unlock()
+
+		// 2. Write to each client outside the lock, with a short deadline
+		//    so a sleeping browser tab cannot stall the entire broadcast.
+		for _, ws := range conns {
+			ws.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+			if _, err := ws.Write(data); err != nil {
+				// Evict the failed client with a brief lock
+				p.wsMu.Lock()
+				ws.Close()
+				delete(p.wsConns, ws)
+				p.wsMu.Unlock()
+			}
+		}
 	}
 }
 
