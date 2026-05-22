@@ -16,12 +16,14 @@ import (
 // ──────────────────────────────────────────────────────────────────────────────
 // H2Transport – HTTP/2 Multiplexing + SNI Rotation + Clean IP Routing
 //
-// CRITICAL FIX: GAS domains (script.google.com, *.googleusercontent.com)
-// MUST use hardcoded/scanned IPs and NEVER system DNS. In censored networks,
-// DNS is poisoned and returns local IPs (192.168.x.x) for Google domains.
+// CRITICAL: DialTLSContext gives us full control over the TLS handshake.
+// Without it, Go's http.Transport uses the URL hostname as SNI, meaning
+// DPI sees "script.google.com" in the ClientHello even if we changed the IP.
+// With DialTLSContext, we inject a fake SNI (e.g., www.google.com) so DPI
+// sees a benign domain while the HTTP Host header carries the real target.
 // ──────────────────────────────────────────────────────────────────────────────
 
-// SNI pool for domain fronting.
+// SNI pool for domain fronting — DPI sees these whitelisted domains.
 var googleSNIs = []string{
 	"www.google.com",
 	"mail.google.com",
@@ -59,19 +61,65 @@ func NewH2Transport() *H2Transport {
 	}
 
 	t := &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: false,
-			MinVersion:         tls.VersionTLS12,
-		},
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   10,
 		MaxConnsPerHost:       20,
 		IdleConnTimeout:       120 * time.Second,
 		DisableKeepAlives:     false,
 		DisableCompression:    true,
-		DialContext:           h2t.dialWithCleanIP,
 		TLSHandshakeTimeout:  10 * time.Second,
 		ResponseHeaderTimeout: 55 * time.Second,
+
+		// For non-TLS traffic
+		DialContext: h2t.dialWithCleanIP,
+
+		// ═══════════════════════════════════════════════════════════════
+		// THE MASTER KEY: Full control over TLS handshake (Domain Fronting)
+		//
+		// Without this, Go's http.Transport uses the URL hostname as SNI:
+		//   URL: https://script.google.com/...
+		//   → TLS ClientHello SNI: script.google.com  (DPI sees this!)
+		//
+		// With DialTLSContext, we inject a fake SNI from our rotation pool:
+		//   → TCP connect to 216.239.38.120:443      (clean Google IP)
+		//   → TLS ClientHello SNI: www.google.com     (DPI sees this!)
+		//   → HTTP Host header: script.google.com     (only Google sees)
+		// ═══════════════════════════════════════════════════════════════
+		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			// Step 1: Open a raw TCP socket to a clean Google IP
+			rawConn, err := h2t.dialWithCleanIP(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+
+			host, _, _ := net.SplitHostPort(addr)
+			sni := host // Default: use the original domain for non-Google traffic
+
+			// Step 2: Apply SNI Rotation for GAS and Google-owned domains
+			if isGASDomain(host) || isGoogleOwned(host) {
+				sni = RandomSNI()
+				log.Printf("[tls] Domain Fronting: target=%s → fake SNI=%s", host, sni)
+			}
+
+			// Step 3: TLS configuration with fake SNI + HTTP/2 ALPN
+			tlsConfig := &tls.Config{
+				ServerName:         sni,
+				InsecureSkipVerify: true, // Required for domain fronting (cert is for SNI domain, not target)
+				MinVersion:         tls.VersionTLS12,
+				NextProtos:         []string{"h2", "http/1.1"},
+			}
+
+			// Step 4: Wrap the raw TCP socket with TLS
+			tlsConn := tls.Client(rawConn, tlsConfig)
+
+			// Step 5: Manual handshake with context deadline
+			if err := tlsConn.HandshakeContext(ctx); err != nil {
+				rawConn.Close()
+				return nil, err
+			}
+
+			return tlsConn, nil
+		},
 	}
 
 	http2.ConfigureTransport(t)
@@ -81,13 +129,6 @@ func NewH2Transport() *H2Transport {
 }
 
 // dialWithCleanIP overrides DNS resolution for Google-owned domains.
-//
-// WHY THIS IS CRITICAL:
-// In censored networks, system DNS is poisoned:
-//   nslookup script.google.com → 192.168.52.89 (local router!)
-//
-// We MUST bypass DNS entirely and use hardcoded/scanned IPs for ALL Google
-// traffic — especially GAS domains which are our relay endpoints.
 func (h *H2Transport) dialWithCleanIP(ctx context.Context, network, addr string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -96,7 +137,6 @@ func (h *H2Transport) dialWithCleanIP(ctx context.Context, network, addr string)
 	}
 
 	if isGASDomain(host) {
-		// GAS domains → use ONLY verified GAS-capable IPs from scanner.
 		bestIPs := h.scanner.BestIPs(3)
 		if len(bestIPs) > 0 {
 			chosenIP := bestIPs[rand.Intn(len(bestIPs))]
@@ -108,7 +148,6 @@ func (h *H2Transport) dialWithCleanIP(ctx context.Context, network, addr string)
 			addr = net.JoinHostPort(fallbackIP, port)
 		}
 	} else if isGoogleOwned(host) {
-		// Other Google domains → use any alive scanned IPs.
 		allIPs := h.scanner.AllAliveIPs(3)
 		if len(allIPs) > 0 {
 			chosenIP := allIPs[rand.Intn(len(allIPs))]

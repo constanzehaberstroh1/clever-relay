@@ -17,19 +17,20 @@ import (
 // H2Transport – HTTP/2 Multiplexing + SNI Rotation + Clean IP Routing
 //
 // Creates persistent HTTP/2 connections to Google IPs with:
+//   - True Domain Fronting via DialTLSContext (not just IP substitution)
 //   - SNI rotation across whitelisted Google domains
 //   - Clean IP routing via IPScanner (fastest IPs from background probing)
 //   - Keep-Alive for connection reuse (eliminates repeated TLS handshakes)
-//   - Configurable TLS for Domain Fronting compatibility
 //
-// CRITICAL FIX: GAS domains (script.google.com, *.googleusercontent.com)
-// MUST use hardcoded/scanned IPs and NEVER system DNS. In censored networks,
-// DNS is poisoned and returns local IPs (192.168.x.x) for Google domains.
-// The scanner verifies which IPs actually serve GAS traffic (not 405).
+// CRITICAL: DialTLSContext gives us full control over the TLS handshake.
+// Without it, Go's http.Transport uses the URL hostname as SNI, meaning
+// DPI sees "script.google.com" in the ClientHello even if we changed the IP.
+// With DialTLSContext, we inject a fake SNI (e.g., www.google.com) so DPI
+// sees a benign domain while the HTTP Host header carries the real target.
 // ──────────────────────────────────────────────────────────────────────────────
 
 // SNI pool for domain fronting — DPI sees these whitelisted domains.
-// Inspired by gasFrontSNIPoolDefault from reference project.
+// These are common Google services that are rarely blocked.
 var googleSNIs = []string{
 	"www.google.com",
 	"mail.google.com",
@@ -62,6 +63,10 @@ type H2Transport struct {
 // NewH2Transport creates a transport optimized for tunneling through Google.
 // It starts a background IPScanner that periodically probes Google IP ranges
 // and routes connections through the fastest reachable IPs.
+//
+// The key innovation is DialTLSContext: instead of letting Go set the SNI
+// from the URL hostname, we manually perform the TLS handshake with a
+// rotated fake SNI. This makes Domain Fronting actually work.
 func NewH2Transport() *H2Transport {
 	scanner := NewIPScanner()
 
@@ -70,28 +75,80 @@ func NewH2Transport() *H2Transport {
 	}
 
 	t := &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: false,
-			MinVersion:         tls.VersionTLS12,
-		},
-		// HTTP/2 settings for multiplexing
+		// HTTP/2 multiplexing settings
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 10,
 		MaxConnsPerHost:     20,
 		IdleConnTimeout:     120 * time.Second,
-		// Keep connections alive
+		// Keep connections alive for reuse
 		DisableKeepAlives: false,
 		// Disable compression (we handle it ourselves with Zstd)
 		DisableCompression: true,
-		// Clean IP Routing: resolve Google domains to scanned IPs
-		DialContext: h2t.dialWithCleanIP,
-		// TLS handshake timeout
-		TLSHandshakeTimeout: 10 * time.Second,
-		// Response header timeout
+		// Timeouts
+		TLSHandshakeTimeout:  10 * time.Second,
 		ResponseHeaderTimeout: 55 * time.Second,
+
+		// For non-TLS traffic (rare, but needed for completeness)
+		DialContext: h2t.dialWithCleanIP,
+
+		// ═══════════════════════════════════════════════════════════════
+		// THE MASTER KEY: Full control over TLS handshake (Domain Fronting)
+		//
+		// Without this, Go's http.Transport uses the URL hostname as SNI:
+		//   URL: https://script.google.com/...
+		//   → TLS ClientHello SNI: script.google.com  (DPI sees this!)
+		//
+		// With DialTLSContext, we intercept the TLS handshake and inject
+		// a fake SNI from our rotation pool:
+		//   → TCP connect to 216.239.38.120:443      (clean Google IP)
+		//   → TLS ClientHello SNI: www.google.com     (DPI sees this!)
+		//   → HTTP Host header: script.google.com     (only Google sees)
+		// ═══════════════════════════════════════════════════════════════
+		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			// Step 1: Open a raw TCP socket to a clean Google IP
+			// (uses scanner's BestIPs for GAS domains, AllAliveIPs for others)
+			rawConn, err := h2t.dialWithCleanIP(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+
+			host, _, _ := net.SplitHostPort(addr)
+			sni := host // Default: use the original domain for non-Google traffic
+
+			// Step 2: Apply SNI Rotation for GAS and Google-owned domains
+			if isGASDomain(host) || isGoogleOwned(host) {
+				sni = RandomSNI()
+				log.Printf("[tls] Domain Fronting: target=%s → fake SNI=%s", host, sni)
+			}
+
+			// Step 3: TLS configuration with fake SNI + HTTP/2 ALPN
+			tlsConfig := &tls.Config{
+				ServerName: sni, // DPI sees this domain, not the real target
+				// We MUST skip verification because we're sending a fake SNI.
+				// Google returns a cert for the SNI domain (e.g., www.google.com),
+				// but Go expects a cert for the URL domain (script.google.com).
+				// This is inherent to Domain Fronting — the cert mismatch is expected.
+				InsecureSkipVerify: true,
+				MinVersion:         tls.VersionTLS12,
+				// ALPN: negotiate HTTP/2 so multiplexing works
+				NextProtos: []string{"h2", "http/1.1"},
+			}
+
+			// Step 4: Wrap the raw TCP socket with TLS
+			tlsConn := tls.Client(rawConn, tlsConfig)
+
+			// Step 5: Manual handshake with context deadline
+			if err := tlsConn.HandshakeContext(ctx); err != nil {
+				rawConn.Close()
+				return nil, err
+			}
+
+			return tlsConn, nil
+		},
 	}
 
-	// Force HTTP/2
+	// Configure HTTP/2 on top of our custom TLS dialer.
+	// This hooks into DialTLSContext and uses the ALPN-negotiated "h2" protocol.
 	http2.ConfigureTransport(t)
 
 	h2t.transport = t
@@ -105,7 +162,6 @@ func NewH2Transport() *H2Transport {
 // In censored networks (Iran, China, etc.), system DNS is poisoned:
 //   nslookup script.google.com → 192.168.52.89 (local router!)
 //
-// This means ANY code using system DNS to resolve Google domains will fail.
 // We MUST bypass DNS entirely and use hardcoded/scanned IPs for ALL Google
 // traffic — especially GAS domains which are our relay endpoints.
 //
