@@ -243,7 +243,8 @@ start_client() {
 
     RELAY_PSK="${RELAY_PSK}" \
     GAS_URLS="${gas}" \
-    nohup "$CLIENT_BIN" -listen ":1080" -psk "$RELAY_PSK" -gas-urls "$gas" > "$CLIENT_LOG" 2>&1 &
+    PANEL_ADDR="127.0.0.1:9090" \
+    nohup "$CLIENT_BIN" -listen ":1080" -panel "127.0.0.1:9090" -psk "$RELAY_PSK" -gas-urls "$gas" > "$CLIENT_LOG" 2>&1 &
 
     echo $! > "$CLIENT_PID"
     sleep 0.5
@@ -251,6 +252,7 @@ start_client() {
     if is_running "$CLIENT_PID"; then
         ok "SOCKS5 client started (PID $(cat "$CLIENT_PID"))"
         dim "Proxy    → 127.0.0.1:1080  (SOCKS5)"
+        dim "Panel    → http://127.0.0.1:9090"
         dim "Scripts  → ${node_count} GAS node(s)"
         dim "Logs     → ${CLIENT_LOG}"
     else
@@ -374,10 +376,11 @@ show_controls() {
     echo ""
     printf "  ${BD}${W}Interactive Controls${RST}\n"
     sep
-    printf "  ${C}d${RST} Open admin dashboard       ${C}w${RST} Launch desktop app\n"
-    printf "  ${C}s${RST} Show status                ${C}l${RST} Tail server logs\n"
-    printf "  ${C}r${RST} Restart all                ${C}c${RST} Tail client logs\n"
-    printf "  ${C}p${RST} Test proxy (curl)          ${C}h${RST} Health check\n"
+    printf "  ${C}d${RST} Server admin dashboard     ${C}a${RST} Client admin panel\n"
+    printf "  ${C}w${RST} Launch desktop app         ${C}s${RST} Show status\n"
+    printf "  ${C}l${RST} Tail server logs           ${C}c${RST} Tail client logs\n"
+    printf "  ${C}r${RST} Restart all                ${C}p${RST} Test proxy (curl)\n"
+    printf "  ${C}h${RST} Health check\n"
     sep
     printf "  ${Y}1${RST} Kill server                ${Y}2${RST} Kill client\n"
     printf "  ${Y}3${RST} Kill desktop               ${Y}0${RST} Kill ALL\n"
@@ -404,8 +407,12 @@ interactive_loop() {
 
             case "$key" in
                 d)
-                    info "Opening admin dashboard..."
+                    info "Opening server admin dashboard..."
                     open_browser "http://localhost:${PORT:-8080}/admin/"
+                    ;;
+                a)
+                    info "Opening client admin panel..."
+                    open_browser "http://127.0.0.1:9090"
                     ;;
                 w)
                     launch_desktop
@@ -551,14 +558,16 @@ show_help() {
     printf "  ${C}--server${RST}      Start only the exit node server\n"
     printf "  ${C}--client${RST}      Start only the SOCKS5 client\n"
     printf "  ${C}--desktop${RST}     Launch the Wails desktop app\n"
-    printf "  ${C}--dashboard${RST}   Open admin dashboard in browser\n"
+    printf "  ${C}--dashboard${RST}   Open server admin dashboard in browser\n"
+    printf "  ${C}--panel${RST}       Open client admin panel in browser\n"
     printf "  ${C}--status${RST}      Show running component status\n"
     printf "  ${C}--stop${RST}        Stop all running components\n"
     printf "  ${C}--logs${RST}        Tail both server and client logs\n"
     printf "  ${C}--help${RST}        Show this help\n"
     echo ""
     printf "${BD}INTERACTIVE KEYS:${RST}\n"
-    printf "  ${C}d${RST}=dashboard  ${C}w${RST}=desktop  ${C}s${RST}=status  ${C}l${RST}=logs  ${C}r${RST}=restart\n"
+    printf "  ${C}d${RST}=server dashboard  ${C}a${RST}=client panel  ${C}w${RST}=desktop  ${C}s${RST}=status\n"
+    printf "  ${C}l${RST}=logs  ${C}r${RST}=restart  ${C}p${RST}=test proxy  ${C}h${RST}=health\n"
     printf "  ${Y}1${RST}=kill server  ${Y}2${RST}=kill client  ${Y}3${RST}=kill desktop  ${Y}0${RST}=kill all\n"
     printf "  ${C}q${RST}=quit\n"
     echo ""
@@ -596,6 +605,9 @@ main() {
         --dashboard|-d)
             load_env
             open_browser "http://localhost:${PORT:-8080}/admin/"
+            ;;
+        --panel|-a)
+            open_browser "http://127.0.0.1:9090"
             ;;
         --status)
             load_env; show_status

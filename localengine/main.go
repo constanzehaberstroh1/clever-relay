@@ -35,6 +35,7 @@ var (
 func main() {
 	// ── CLI Flags ────────────────────────────────────────────────────────
 	socksAddr := flag.String("listen", ":1080", "SOCKS5 listen address")
+	panelAddr := flag.String("panel", "127.0.0.1:9090", "Admin panel listen address")
 	pskHex := flag.String("psk", "", "Pre-shared key (64 hex chars = 32 bytes)")
 	gasURLs := flag.String("gas-urls", "", "Comma-separated Google Apps Script URLs")
 	flag.Parse()
@@ -45,6 +46,9 @@ func main() {
 	}
 	if *gasURLs == "" {
 		*gasURLs = os.Getenv("GAS_URLS")
+	}
+	if pa := os.Getenv("PANEL_ADDR"); pa != "" {
+		*panelAddr = pa
 	}
 
 	if *pskHex == "" {
@@ -82,16 +86,21 @@ func main() {
 	// Start the SOCKS5 server
 	socks := NewSOCKS5Server(*socksAddr, proto, chunker, pool)
 
+	// Phase 8: Start the client admin panel
+	panel := NewPanelServer(*panelAddr, pool, socks, logger)
+
 	logger.Info("startup", "Clever Relay – Local Client starting...")
 	logger.Infof("startup", "SOCKS5 listening on %s", *socksAddr)
+	logger.Infof("startup", "Admin panel on http://%s", *panelAddr)
 	logger.Infof("startup", "GAS Pool: %d scripts", len(urls))
 	logger.Info("startup", "Scanner: Active (5 min interval)")
 	logger.Info("startup", "Polling: Reverse (3 parallel)")
 
 	log.Printf("╔══════════════════════════════════════════════════╗")
-	log.Printf("║     Clever Relay – Local Client (Phase 5)       ║")
+	log.Printf("║     Clever Relay – Local Client (Phase 8)       ║")
 	log.Printf("╠══════════════════════════════════════════════════╣")
 	log.Printf("║ SOCKS5   : %-37s ║", *socksAddr)
+	log.Printf("║ Panel    : %-37s ║", fmt.Sprintf("http://%s", *panelAddr))
 	log.Printf("║ GAS Pool : %-37s ║", fmt.Sprintf("%d scripts", len(urls)))
 	log.Printf("║ Scanner  : %-37s ║", "Active (5 min interval)")
 	log.Printf("║ Padding  : %-37s ║", "16–512 bytes random")
@@ -101,6 +110,12 @@ func main() {
 	go func() {
 		if err := socks.ListenAndServe(); err != nil {
 			log.Fatalf("SOCKS5 server error: %v", err)
+		}
+	}()
+
+	go func() {
+		if err := panel.ListenAndServe(); err != nil {
+			log.Printf("[panel] Admin panel error: %v", err)
 		}
 	}()
 
