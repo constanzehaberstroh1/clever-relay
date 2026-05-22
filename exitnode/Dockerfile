@@ -16,6 +16,14 @@ COPY dataengine/ ./dataengine/
 # Copy the exitnode module
 COPY exitnode/ ./exitnode/
 
+COPY frontend/ ./frontend/
+
+WORKDIR /build/frontend
+RUN npm install && npm run build
+
+RUN mkdir -p /build/exitnode/dashboard/dist && \
+    cp -r dist/* /build/exitnode/dashboard/dist/
+
 # Download dependencies
 WORKDIR /build/exitnode
 RUN go mod download
