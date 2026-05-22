@@ -3,7 +3,8 @@
 # ──────────────────────────────────────────────────────────────────────────────
 FROM node:20-alpine AS frontend-builder
 WORKDIR /app
-COPY frontend/ ./frontend/
+# کپی کامل پروژه برای دسترسی به ساختار sibling پوشه‌ها
+COPY . . 
 WORKDIR /app/frontend
 RUN npm install && npm run build
 
@@ -19,9 +20,9 @@ WORKDIR /build
 COPY dataengine/ ./dataengine/
 COPY exitnode/ ./exitnode/
 
-# کپی فایل‌های بیلد شده از استیج اول به مسیر مطلق در استیج دوم
-# دقت کنید: خروجی فرانت‌اند در /app/frontend/dist است
-COPY --from=frontend-builder /app/frontend/dist/ /build/exitnode/dashboard/dist/
+# کپی فایل‌های بیلد شده از خروجی Vite (طبق لاگ شما)
+# از استیج اول به مسیر مطلق در استیج دوم
+COPY --from=frontend-builder /app/exitnode/dashboard/dist/ /build/exitnode/dashboard/dist/
 
 # بیلد کردن Go
 WORKDIR /build/exitnode
