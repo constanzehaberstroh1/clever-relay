@@ -46,6 +46,7 @@ type PanelServer struct {
 	addr      string
 	pool      *GASPool
 	socks     *SOCKS5Server
+	httpProxy *HTTPProxyServer
 	logger    *dataengine.Logger
 	startTime time.Time
 
@@ -183,6 +184,20 @@ func (p *PanelServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"dropped": p.logger.Dropped(),
 			"buffered": p.logger.Count(),
 		},
+	}
+
+	// Add HTTP proxy info if available
+	if p.httpProxy != nil {
+		status["http_proxy"] = map[string]interface{}{
+			"active":       true,
+			"addr":         p.httpProxy.Addr(),
+			"active_conns": p.httpProxy.ActiveConns(),
+			"total_conns":  p.httpProxy.TotalConns(),
+		}
+	} else {
+		status["http_proxy"] = map[string]interface{}{
+			"active": false,
+		}
 	}
 
 	writeJSON(w, status)

@@ -5,11 +5,12 @@
 //
 // Architecture sub-modules (all in this package):
 //
-//   - SOCKS5 server   (socks5.go)   – Listens on :1080, assigns SessionIDs
-//   - Micro-Chunker   (chunker.go)  – 10ms / 256KB flush, batches packets
-//   - Smart GAS Pool  (pool.go)     – Weighted latency + Circuit Breaker
-//   - H2 Transport    (transport.go) – HTTP/2 multiplexing + SNI Rotation
-//   - Downlink Engine (downlink.go) – PULL scheduler + SeqNum reassembly
+//   - SOCKS5 server   (socks5.go)      – Listens on :1080, assigns SessionIDs
+//   - HTTP Proxy      (http_proxy.go)   – HTTP/HTTPS proxy via SOCKS5 (:8080)
+//   - Micro-Chunker   (chunker.go)      – 10ms / 256KB flush, batches packets
+//   - Smart GAS Pool  (pool.go)         – Weighted latency + Circuit Breaker
+//   - H2 Transport    (transport.go)    – HTTP/2 multiplexing + SNI Rotation
+//   - Downlink Engine (downlink.go)     – PULL scheduler + SeqNum reassembly
 package main
 
 import (
@@ -35,6 +36,7 @@ var (
 func main() {
 	// ── CLI Flags ────────────────────────────────────────────────────────
 	socksAddr := flag.String("listen", ":1080", "SOCKS5 listen address")
+	httpAddr := flag.String("http-proxy", ":8080", "HTTP/HTTPS proxy listen address (set to empty to disable)")
 	panelAddr := flag.String("panel", "127.0.0.1:9090", "Admin panel listen address")
 	pskHex := flag.String("psk", "", "Pre-shared key (64 hex chars = 32 bytes)")
 	gasURLs := flag.String("gas-urls", "", "Comma-separated Google Apps Script URLs")
@@ -49,6 +51,9 @@ func main() {
 	}
 	if pa := os.Getenv("PANEL_ADDR"); pa != "" {
 		*panelAddr = pa
+	}
+	if ha := os.Getenv("HTTP_PROXY_ADDR"); ha != "" {
+		*httpAddr = ha
 	}
 
 	if *pskHex == "" {
@@ -94,20 +99,33 @@ func main() {
 	// Start the SOCKS5 server
 	socks := NewSOCKS5Server(*socksAddr, proto, chunker, pool)
 
-	// Phase 8: Start the client admin panel
+	// Phase 9: HTTP/HTTPS proxy (forwards through SOCKS5)
+	var httpProxy *HTTPProxyServer
+	if *httpAddr != "" {
+		httpProxy = NewHTTPProxyServer(*httpAddr, *socksAddr, logger)
+	}
+
+	// Phase 8: Start the client admin panel (after httpProxy so it can report status)
 	panel := NewPanelServer(*panelAddr, pool, socks, logger)
+	panel.httpProxy = httpProxy
 
 	logger.Info("startup", "Clever Relay – Local Client starting...")
 	logger.Infof("startup", "SOCKS5 listening on %s", *socksAddr)
+	if httpProxy != nil {
+		logger.Infof("startup", "HTTP proxy listening on %s", *httpAddr)
+	}
 	logger.Infof("startup", "Admin panel on http://%s", *panelAddr)
 	logger.Infof("startup", "GAS Pool: %d scripts", len(urls))
 	logger.Info("startup", "Scanner: Active (5 min interval)")
 	logger.Info("startup", "Polling: Reverse (3 parallel)")
 
 	log.Printf("╔══════════════════════════════════════════════════╗")
-	log.Printf("║     Clever Relay – Local Client (Phase 8)       ║")
+	log.Printf("║     Clever Relay – Local Client (Phase 9)       ║")
 	log.Printf("╠══════════════════════════════════════════════════╣")
 	log.Printf("║ SOCKS5   : %-37s ║", *socksAddr)
+	if httpProxy != nil {
+		log.Printf("║ HTTP     : %-37s ║", *httpAddr)
+	}
 	log.Printf("║ Panel    : %-37s ║", fmt.Sprintf("http://%s", *panelAddr))
 	log.Printf("║ GAS Pool : %-37s ║", fmt.Sprintf("%d scripts", len(urls)))
 	log.Printf("║ Scanner  : %-37s ║", "Active (5 min interval)")
@@ -127,6 +145,16 @@ func main() {
 		}
 	}()
 
+	// Phase 9: Start HTTP proxy
+	if httpProxy != nil {
+		go func() {
+			if err := httpProxy.ListenAndServe(); err != nil {
+				logger.Errorf("http-proxy", "HTTP proxy failed: %v", err)
+				log.Printf("[http-proxy] HTTP proxy error: %v", err)
+			}
+		}()
+	}
+
 	// ── Graceful Shutdown ────────────────────────────────────────────────
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, os.Interrupt, syscall.SIGTERM)
@@ -134,6 +162,9 @@ func main() {
 
 	logger.Info("shutdown", "Shutting down local engine...")
 	log.Println("Shutting down local engine...")
+	if httpProxy != nil {
+		httpProxy.Close()
+	}
 	socks.Close()
 	chunker.Close()
 	pool.Close()
