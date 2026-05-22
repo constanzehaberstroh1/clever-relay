@@ -35,6 +35,57 @@ const (
 	atypIPv6      = 0x04
 )
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Phase 4: Direct Routing List (Split Tunneling)
+//
+// Domains in this list are routed DIRECTLY to the internet, bypassing the
+// GAS tunnel entirely. This is critical for:
+//   1. User's own Google services (mail, drive) — tunneling these through GAS
+//      can trigger account security alerts and degrade performance.
+//   2. Services that detect and block proxy traffic.
+//   3. Reducing GAS quota usage by only tunneling what needs to be tunneled.
+//
+// When the client sends a CONNECT request for one of these domains, the proxy
+// performs a direct net.Dial and relays bytes with io.Copy (L4 TCP relay).
+// ──────────────────────────────────────────────────────────────────────────────
+
+// directRoutingDomains contains domains that should bypass the GAS tunnel.
+// These are routed directly to the internet via the local network.
+// Inspired by gasGoogleDirectExactExclude from the reference project.
+var directRoutingDomains = map[string]bool{
+	// Google account/productivity services
+	"mail.google.com":        true,
+	"drive.google.com":       true,
+	"docs.google.com":        true,
+	"sheets.google.com":      true,
+	"slides.google.com":      true,
+	"calendar.google.com":    true,
+	"photos.google.com":      true,
+	"meet.google.com":        true,
+	"chat.google.com":        true,
+	"contacts.google.com":    true,
+	"keep.google.com":        true,
+	"classroom.google.com":   true,
+	"maps.google.com":        true,
+	"translate.google.com":   true,
+	// Google AI services
+	"gemini.google.com":      true,
+	"aistudio.google.com":    true,
+	"notebooklm.google.com":  true,
+	"labs.google.com":        true,
+	// Account management
+	"accounts.google.com":    true,
+	"myaccount.google.com":   true,
+	"ogs.google.com":         true,
+	// Play Store
+	"play.google.com":        true,
+	// Other sensitive services
+	"pay.google.com":         true,
+	"wallet.google.com":      true,
+	"assistant.google.com":   true,
+	"lens.google.com":        true,
+}
+
 // SOCKS5Server listens for SOCKS5 connections and tunnels them through GAS.
 type SOCKS5Server struct {
 	addr     string
@@ -149,6 +200,14 @@ func (s *SOCKS5Server) handleConnection(conn net.Conn) {
 		return
 	}
 
+	// ── Phase 4: Split Tunneling Decision ─────────────────────────────
+	// Check if this domain should be routed directly (bypassing GAS tunnel)
+	if s.shouldDirectRoute(target) {
+		log.Printf("[socks5] DIRECT routing for %s (bypassing tunnel)", target)
+		s.handleDirectConnect(conn, target)
+		return
+	}
+
 	// ── Step 3: Create Session and Connect ────────────────────────────
 	sid, err := dataengine.NewSessionID()
 	if err != nil {
@@ -217,6 +276,66 @@ func (s *SOCKS5Server) handleConnection(conn net.Conn) {
 
 	s.sessions.Delete(sid)
 	log.Printf("[socks5] session %x closed", sid[:4])
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Phase 4: Direct Routing (Split Tunneling)
+// ──────────────────────────────────────────────────────────────────────────────
+
+// shouldDirectRoute checks if a target address should bypass the GAS tunnel.
+func (s *SOCKS5Server) shouldDirectRoute(target string) bool {
+	host, _, err := net.SplitHostPort(target)
+	if err != nil {
+		host = target
+	}
+	return directRoutingDomains[host]
+}
+
+// handleDirectConnect establishes a direct TCP connection to the target,
+// bypassing the GAS tunnel entirely. This is used for split tunneling:
+// sensitive Google services that shouldn't go through the relay.
+//
+// The implementation is a simple L4 TCP relay:
+//   1. Dial the real destination directly
+//   2. Send SOCKS5 success reply
+//   3. io.Copy both directions until either side closes
+func (s *SOCKS5Server) handleDirectConnect(clientConn net.Conn, target string) {
+	// Dial the destination directly (not through GAS)
+	destConn, err := net.DialTimeout("tcp", target, 10*time.Second)
+	if err != nil {
+		log.Printf("[socks5] DIRECT dial failed: %s → %v", target, err)
+		s.sendReply(clientConn, 0x05) // Connection refused
+		return
+	}
+
+	// Send SOCKS5 success reply
+	s.sendReply(clientConn, 0x00)
+
+	// Bidirectional relay — just copy bytes in both directions
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Client → Destination
+	go func() {
+		defer wg.Done()
+		io.Copy(destConn, clientConn)
+		if tc, ok := destConn.(*net.TCPConn); ok {
+			tc.CloseWrite()
+		}
+	}()
+
+	// Destination → Client
+	go func() {
+		defer wg.Done()
+		io.Copy(clientConn, destConn)
+		if tc, ok := clientConn.(*net.TCPConn); ok {
+			tc.CloseWrite()
+		}
+	}()
+
+	wg.Wait()
+	destConn.Close()
+	log.Printf("[socks5] DIRECT session closed: %s", target)
 }
 
 // uplinkLoop reads data from the browser and sends it to the exit node.

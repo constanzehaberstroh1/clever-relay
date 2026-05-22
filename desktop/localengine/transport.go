@@ -3,6 +3,7 @@ package localengine
 import (
 	"context"
 	"crypto/tls"
+	"log"
 	"math/rand"
 	"net"
 	"net/http"
@@ -15,21 +16,16 @@ import (
 // ──────────────────────────────────────────────────────────────────────────────
 // H2Transport – HTTP/2 Multiplexing + SNI Rotation + Clean IP Routing
 //
-// Creates persistent HTTP/2 connections to Google IPs with:
-//   - SNI rotation across whitelisted Google domains
-//   - Clean IP routing via IPScanner (fastest IPs from background probing)
-//   - Keep-Alive for connection reuse (eliminates repeated TLS handshakes)
-//   - Configurable TLS for Domain Fronting compatibility
-//
-// Phase 5: The scanner integration ensures that even when a local ISP
-// degrades routing to certain Google IP ranges, we always use the fastest
-// reachable path.
+// CRITICAL FIX: GAS domains (script.google.com, *.googleusercontent.com)
+// MUST use hardcoded/scanned IPs and NEVER system DNS. In censored networks,
+// DNS is poisoned and returns local IPs (192.168.x.x) for Google domains.
 // ──────────────────────────────────────────────────────────────────────────────
 
-// Whitelisted Google domains for SNI rotation.
-// Iran's DPI sees these domains and allows the traffic.
+// SNI pool for domain fronting.
 var googleSNIs = []string{
+	"www.google.com",
 	"mail.google.com",
+	"accounts.google.com",
 	"drive.google.com",
 	"maps.google.com",
 	"docs.google.com",
@@ -37,8 +33,15 @@ var googleSNIs = []string{
 	"calendar.google.com",
 	"translate.google.com",
 	"photos.google.com",
-	"meet.google.com",
-	"chat.google.com",
+}
+
+// googleOwnedSuffixes defines domains that belong to Google infrastructure.
+var googleOwnedSuffixes = []string{
+	".google.com",
+	".google.co",
+	".googleapis.com",
+	".gstatic.com",
+	".googleusercontent.com",
 }
 
 // H2Transport manages HTTP/2 connections with SNI rotation and clean IP routing.
@@ -48,8 +51,6 @@ type H2Transport struct {
 }
 
 // NewH2Transport creates a transport optimized for tunneling through Google.
-// It starts a background IPScanner that periodically probes Google IP ranges
-// and routes connections through the fastest reachable IPs.
 func NewH2Transport() *H2Transport {
 	scanner := NewIPScanner()
 
@@ -62,32 +63,31 @@ func NewH2Transport() *H2Transport {
 			InsecureSkipVerify: false,
 			MinVersion:         tls.VersionTLS12,
 		},
-		// HTTP/2 settings for multiplexing
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 10,
-		MaxConnsPerHost:     20,
-		IdleConnTimeout:     120 * time.Second,
-		// Keep connections alive
-		DisableKeepAlives: false,
-		// Disable compression (we handle it ourselves with Zstd)
-		DisableCompression: true,
-		// Clean IP Routing: resolve script.google.com to scanned IPs
-		DialContext: h2t.dialWithCleanIP,
-		// TLS handshake timeout
-		TLSHandshakeTimeout: 10 * time.Second,
-		// Response header timeout
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   10,
+		MaxConnsPerHost:       20,
+		IdleConnTimeout:       120 * time.Second,
+		DisableKeepAlives:     false,
+		DisableCompression:    true,
+		DialContext:           h2t.dialWithCleanIP,
+		TLSHandshakeTimeout:  10 * time.Second,
 		ResponseHeaderTimeout: 55 * time.Second,
 	}
 
-	// Force HTTP/2
 	http2.ConfigureTransport(t)
 
 	h2t.transport = t
 	return h2t
 }
 
-// dialWithCleanIP overrides DNS resolution for Google domains, routing
-// connections through the fastest IP discovered by the background scanner.
+// dialWithCleanIP overrides DNS resolution for Google-owned domains.
+//
+// WHY THIS IS CRITICAL:
+// In censored networks, system DNS is poisoned:
+//   nslookup script.google.com → 192.168.52.89 (local router!)
+//
+// We MUST bypass DNS entirely and use hardcoded/scanned IPs for ALL Google
+// traffic — especially GAS domains which are our relay endpoints.
 func (h *H2Transport) dialWithCleanIP(ctx context.Context, network, addr string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -95,12 +95,23 @@ func (h *H2Transport) dialWithCleanIP(ctx context.Context, network, addr string)
 		port = "443"
 	}
 
-	// Only override for Google domains (script.google.com and its redirects)
-	if strings.HasSuffix(host, ".google.com") || strings.HasSuffix(host, ".googleapis.com") {
+	if isGASDomain(host) {
+		// GAS domains → use ONLY verified GAS-capable IPs from scanner.
 		bestIPs := h.scanner.BestIPs(3)
 		if len(bestIPs) > 0 {
-			// Pick a random IP from the top 3 to distribute load
 			chosenIP := bestIPs[rand.Intn(len(bestIPs))]
+			log.Printf("[transport] GAS domain %s → scanned IP %s (DNS bypass)", host, chosenIP)
+			addr = net.JoinHostPort(chosenIP, port)
+		} else {
+			fallbackIP := gasFallbackIP()
+			log.Printf("[transport] GAS domain %s → fallback IP %s (scanner empty)", host, fallbackIP)
+			addr = net.JoinHostPort(fallbackIP, port)
+		}
+	} else if isGoogleOwned(host) {
+		// Other Google domains → use any alive scanned IPs.
+		allIPs := h.scanner.AllAliveIPs(3)
+		if len(allIPs) > 0 {
+			chosenIP := allIPs[rand.Intn(len(allIPs))]
 			addr = net.JoinHostPort(chosenIP, port)
 		}
 	}
@@ -110,6 +121,33 @@ func (h *H2Transport) dialWithCleanIP(ctx context.Context, network, addr string)
 		KeepAlive: 30 * time.Second,
 	}
 	return dialer.DialContext(ctx, network, addr)
+}
+
+// isGASDomain returns true if the host is a Google Apps Script domain.
+func isGASDomain(host string) bool {
+	return host == "script.google.com" ||
+		strings.HasSuffix(host, ".googleusercontent.com")
+}
+
+// isGoogleOwned returns true if the host belongs to Google infrastructure.
+func isGoogleOwned(host string) bool {
+	for _, suffix := range googleOwnedSuffixes {
+		if strings.HasSuffix(host, suffix) || host == strings.TrimPrefix(suffix, ".") {
+			return true
+		}
+	}
+	return false
+}
+
+// gasFallbackIP returns a hardcoded App Engine IP for pre-scanner startup.
+func gasFallbackIP() string {
+	fallbacks := []string{
+		"216.239.32.120",
+		"216.239.34.120",
+		"216.239.36.120",
+		"216.239.38.120",
+	}
+	return fallbacks[rand.Intn(len(fallbacks))]
 }
 
 // Transport returns the underlying http.Transport for use with http.Client.

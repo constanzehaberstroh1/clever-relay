@@ -96,6 +96,10 @@ func main() {
 	pool := NewGASPool(urls, transport)
 	chunker := NewChunker(proto, pool)
 
+	// Phase 1-2: Raw GAS relay with connection pooling
+	gasRelay := NewGASRelay(transport.Scanner())
+	_ = gasRelay // Available for direct GAS dispatch when needed
+
 	// Start the SOCKS5 server
 	socks := NewSOCKS5Server(*socksAddr, proto, chunker, pool)
 
@@ -120,7 +124,7 @@ func main() {
 	logger.Info("startup", "Polling: Reverse (3 parallel)")
 
 	log.Printf("╔══════════════════════════════════════════════════╗")
-	log.Printf("║     Clever Relay – Local Client (Phase 9)       ║")
+	log.Printf("║   Clever Relay – Local Client (Phase 10)        ║")
 	log.Printf("╠══════════════════════════════════════════════════╣")
 	log.Printf("║ SOCKS5   : %-37s ║", *socksAddr)
 	if httpProxy != nil {
@@ -128,9 +132,11 @@ func main() {
 	}
 	log.Printf("║ Panel    : %-37s ║", fmt.Sprintf("http://%s", *panelAddr))
 	log.Printf("║ GAS Pool : %-37s ║", fmt.Sprintf("%d scripts", len(urls)))
-	log.Printf("║ Scanner  : %-37s ║", "Active (5 min interval)")
+	log.Printf("║ Scanner  : %-37s ║", "App Engine Targeted (5 min)")
 	log.Printf("║ Padding  : %-37s ║", "16–512 bytes random")
 	log.Printf("║ Polling  : %-37s ║", "Reverse (3 parallel)")
+	log.Printf("║ Split    : %-37s ║", fmt.Sprintf("%d direct-route domains", len(directRoutingDomains)))
+	log.Printf("║ ConnPool : %-37s ║", "10 TLS conns, 120s idle")
 	log.Printf("╚══════════════════════════════════════════════════╝")
 
 	go func() {
@@ -168,6 +174,7 @@ func main() {
 	socks.Close()
 	chunker.Close()
 	pool.Close()
+	gasRelay.Close()  // Phase 1-2: close raw relay pool
 	transport.Close() // Phase 5: stops the IP scanner
 	logger.Close()    // Drain remaining logs to sinks
 	log.Println("Goodbye.")
