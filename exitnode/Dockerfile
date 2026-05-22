@@ -15,12 +15,13 @@ RUN apk add --no-cache git ca-certificates
 
 WORKDIR /build
 
-# کپی ماژول‌ها و سوریس
+# کپی سورس کدها
 COPY dataengine/ ./dataengine/
 COPY exitnode/ ./exitnode/
 
-# کپی خروجی بیلد شده فرانت‌اند از استیج اول به مسیر مورد نظر در Go
-COPY --from=frontend-builder /app/frontend/dist/ ./exitnode/dashboard/dist/
+# کپی فایل‌های بیلد شده از استیج اول به مسیر مطلق در استیج دوم
+# دقت کنید: خروجی فرانت‌اند در /app/frontend/dist است
+COPY --from=frontend-builder /app/frontend/dist/ /build/exitnode/dashboard/dist/
 
 # بیلد کردن Go
 WORKDIR /build/exitnode
