@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"log"
 
 	"github.com/salman/clever-relay/dataengine"
 )
@@ -32,7 +33,8 @@ type TunnelLogger struct {
 }
 
 // NewTunnelLogger creates a tunnel logger backed by the global engine.
-// It adds a ConsoleSink for terminal output automatically.
+// It adds a ConsoleSink for terminal output and a FileSink for daily-rotating
+// disk logs automatically.
 func NewTunnelLogger() *TunnelLogger {
 	engine := dataengine.NewLogger(
 		dataengine.DefaultQueueSize,
@@ -40,6 +42,15 @@ func NewTunnelLogger() *TunnelLogger {
 	)
 	// Always add colored console output for the exit node
 	engine.AddSink(dataengine.NewConsoleSink(true))
+
+	// File output with daily rotation + automatic 7-day retention
+	// Files: ./logs/exitnode_2026-05-22.log
+	if fileSink, err := dataengine.NewFileSink("./logs", "exitnode"); err == nil {
+		engine.AddSink(fileSink)
+	} else {
+		log.Printf("[WARN] Could not create log directory/file on cloud: %v", err)
+	}
+
 	return &TunnelLogger{engine: engine}
 }
 

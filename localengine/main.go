@@ -78,6 +78,14 @@ func main() {
 	logger := dataengine.NewLogger(dataengine.DefaultQueueSize, dataengine.DefaultRingSize)
 	logger.AddSink(dataengine.NewConsoleSink(true))
 
+	// File output with daily rotation + automatic 7-day retention
+	// Files: ./logs/client_2026-05-22.log
+	if fileSink, err := dataengine.NewFileSink("./logs", "client"); err == nil {
+		logger.AddSink(fileSink)
+	} else {
+		log.Printf("[WARN] Could not create log directory/file: %v", err)
+	}
+
 	// Phase 5: H2Transport now starts a background IP scanner automatically
 	transport := NewH2Transport()
 	pool := NewGASPool(urls, transport)
