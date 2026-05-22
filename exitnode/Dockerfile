@@ -1,42 +1,39 @@
 # ──────────────────────────────────────────────────────────────────────────────
-# Multi-stage Dockerfile for the Clever Relay Exit Node
-# Optimized for minimal image size and fast startup on Clever Cloud
+# Stage 1: Build Frontend
 # ──────────────────────────────────────────────────────────────────────────────
+FROM node:20-alpine AS frontend-builder
+WORKDIR /app
+COPY frontend/ ./frontend/
+WORKDIR /app/frontend
+RUN npm install && npm run build
 
-# Stage 1: Build
+# ──────────────────────────────────────────────────────────────────────────────
+# Stage 2: Build Go Binary
+# ──────────────────────────────────────────────────────────────────────────────
 FROM golang:1.26-alpine AS builder
-
 RUN apk add --no-cache git ca-certificates
 
 WORKDIR /build
 
-# Copy the dataengine module first (dependency)
+# کپی ماژول‌ها و سوریس
 COPY dataengine/ ./dataengine/
-
-# Copy the exitnode module
 COPY exitnode/ ./exitnode/
 
-COPY frontend/ ./frontend/
+# کپی خروجی بیلد شده فرانت‌اند از استیج اول به مسیر مورد نظر در Go
+COPY --from=frontend-builder /app/frontend/dist/ ./exitnode/dashboard/dist/
 
-WORKDIR /build/frontend
-RUN npm install && npm run build
-
-RUN mkdir -p /build/exitnode/dashboard/dist && \
-    cp -r dist/* /build/exitnode/dashboard/dist/
-
-# Download dependencies
+# بیلد کردن Go
 WORKDIR /build/exitnode
 RUN go mod download
-
-# Build the binary with optimizations
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -ldflags="-w -s" \
     -trimpath \
     -o /build/exitnode-bin .
 
-# Stage 2: Runtime
+# ──────────────────────────────────────────────────────────────────────────────
+# Stage 3: Runtime
+# ──────────────────────────────────────────────────────────────────────────────
 FROM alpine:3.19
-
 RUN apk add --no-cache ca-certificates tzdata
 
 # Create a non-root user
@@ -44,14 +41,11 @@ RUN adduser -D -u 1000 relay
 USER relay
 
 WORKDIR /app
-
 COPY --from=builder /build/exitnode-bin /app/exitnode
 
-# Clever Cloud expects port 8080
 EXPOSE 8080
 ENV PORT=8080
 
-# Health check for Clever Cloud
 HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
     CMD wget -qO- http://localhost:8080/health || exit 1
 
