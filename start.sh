@@ -1,30 +1,10 @@
 #!/usr/bin/env bash
 # ══════════════════════════════════════════════════════════════════════════════
 # Clever Relay – Local Stack Runner
-#
-# Starts the full local development stack with interactive controls.
-#
-# Usage:
-#   ./start.sh                  Start full local stack (server + client)
-#   ./start.sh --client         Start only the SOCKS5 client
-#   ./start.sh --server         Start only the exit node server
-#   ./start.sh --desktop        Start the Wails desktop app
-#   ./start.sh --status         Show running component status
-#   ./start.sh --stop           Stop all running components
-#   ./start.sh --help           Show help
-#
-# Interactive Keys (while running):
-#   [d] Open admin dashboard in browser
-#   [w] Launch Wails desktop app
-#   [s] Show status of all components
-#   [l] Tail server logs
-#   [r] Restart all components
-#   [q] Graceful shutdown
 # ══════════════════════════════════════════════════════════════════════════════
 
-set -euo pipefail
+set -uo pipefail
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR="${SCRIPT_DIR}/bin"
 ENV_FILE="${SCRIPT_DIR}/.env"
@@ -35,22 +15,28 @@ SERVER_BIN="${BIN_DIR}/clever-relay-server"
 CLIENT_BIN="${BIN_DIR}/clever-relay-client"
 SERVER_PID="${PID_DIR}/server.pid"
 CLIENT_PID="${PID_DIR}/client.pid"
+DESKTOP_PID="${PID_DIR}/desktop.pid"
 SERVER_LOG="${LOG_DIR}/server.log"
 CLIENT_LOG="${LOG_DIR}/client.log"
+DESKTOP_LOG="${LOG_DIR}/desktop.log"
 
 # ── Colors ────────────────────────────────────────────────────────────────────
-R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'; B='\033[0;34m'
-C='\033[0;36m'; W='\033[1;37m'; D='\033[2m'; BD='\033[1m'; RST='\033[0m'
+if [[ -t 1 ]]; then
+    R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'; B='\033[0;34m'
+    C='\033[0;36m'; W='\033[1;37m'; D='\033[2m'; BD='\033[1m'; RST='\033[0m'
+else
+    R=''; G=''; Y=''; B=''; C=''; W=''; D=''; BD=''; RST=''
+fi
 
 OK="${G}✓${RST}"; FAIL="${R}✗${RST}"; WARN="${Y}⚠${RST}"; DOT="${C}▸${RST}"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-info()    { echo -e "  ${DOT} ${W}$*${RST}"; }
-ok()      { echo -e "  ${OK} ${G}$*${RST}"; }
-warn()    { echo -e "  ${WARN} ${Y}$*${RST}"; }
-err()     { echo -e "  ${FAIL} ${R}$*${RST}"; }
-dim()     { echo -e "     ${D}$*${RST}"; }
-sep()     { echo -e "  ${D}─────────────────────────────────────────────────────${RST}"; }
+info()  { printf "  ${DOT} ${W}%s${RST}\n" "$*"; }
+ok()    { printf "  ${OK} ${G}%s${RST}\n" "$*"; }
+warn()  { printf "  ${WARN} ${Y}%s${RST}\n" "$*"; }
+err()   { printf "  ${FAIL} ${R}%s${RST}\n" "$*"; }
+dim()   { printf "     ${D}%s${RST}\n" "$*"; }
+sep()   { printf "  ${D}─────────────────────────────────────────────────────${RST}\n"; }
 
 is_running() {
     local pidfile="$1"
@@ -60,25 +46,78 @@ is_running() {
 kill_pid() {
     local pidfile="$1" name="$2"
     if is_running "$pidfile"; then
-        local pid; pid=$(cat "$pidfile")
-        kill "$pid" 2>/dev/null
-        for _ in $(seq 1 30); do
-            kill -0 "$pid" 2>/dev/null || break
+        local pid
+        pid=$(cat "$pidfile")
+        kill "$pid" 2>/dev/null || true
+        local i=0
+        while kill -0 "$pid" 2>/dev/null && [[ $i -lt 30 ]]; do
             sleep 0.1
+            i=$((i + 1))
         done
         kill -9 "$pid" 2>/dev/null || true
         rm -f "$pidfile"
         ok "${name} stopped (PID ${pid})"
+    else
+        rm -f "$pidfile" 2>/dev/null || true
     fi
 }
 
 open_browser() {
     local url="$1"
-    if command -v xdg-open &>/dev/null; then xdg-open "$url" 2>/dev/null &
-    elif command -v open &>/dev/null; then open "$url" 2>/dev/null &
-    elif command -v wslview &>/dev/null; then wslview "$url" 2>/dev/null &
-    else warn "Cannot open browser. Visit: ${url}"; return; fi
-    ok "Opened ${url}"
+    local opened=0
+    # Try multiple browser openers
+    if command -v xdg-open &>/dev/null; then
+        nohup xdg-open "$url" >/dev/null 2>&1 &
+        disown 2>/dev/null || true
+        opened=1
+    elif command -v open &>/dev/null; then
+        open "$url" 2>/dev/null &
+        disown 2>/dev/null || true
+        opened=1
+    elif command -v sensible-browser &>/dev/null; then
+        nohup sensible-browser "$url" >/dev/null 2>&1 &
+        disown 2>/dev/null || true
+        opened=1
+    elif command -v wslview &>/dev/null; then
+        wslview "$url" 2>/dev/null &
+        disown 2>/dev/null || true
+        opened=1
+    elif command -v firefox &>/dev/null; then
+        nohup firefox "$url" >/dev/null 2>&1 &
+        disown 2>/dev/null || true
+        opened=1
+    elif command -v google-chrome &>/dev/null; then
+        nohup google-chrome "$url" >/dev/null 2>&1 &
+        disown 2>/dev/null || true
+        opened=1
+    elif command -v chromium-browser &>/dev/null; then
+        nohup chromium-browser "$url" >/dev/null 2>&1 &
+        disown 2>/dev/null || true
+        opened=1
+    fi
+
+    if [[ $opened -eq 1 ]]; then
+        ok "Opened: ${url}"
+    else
+        warn "No browser found. Open manually:"
+        dim "$url"
+    fi
+}
+
+# ── Terminal helpers ──────────────────────────────────────────────────────────
+save_term=""
+
+setup_terminal() {
+    if [[ -t 0 ]]; then
+        save_term=$(stty -g 2>/dev/null || true)
+    fi
+}
+
+restore_terminal() {
+    if [[ -n "$save_term" ]] && [[ -t 0 ]]; then
+        stty "$save_term" 2>/dev/null || true
+    fi
+    printf '\033[?25h' # ensure cursor is visible
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -86,14 +125,14 @@ open_browser() {
 # ══════════════════════════════════════════════════════════════════════════════
 
 banner() {
-    echo -e "${C}${BD}"
+    printf "\n${C}${BD}"
     cat << 'BANNER'
      ┌─────────────────────────────────────────────────┐
      │        CLEVER RELAY · Local Stack Runner        │
      │          L4-over-L7 Tunnel · Phase 6            │
      └─────────────────────────────────────────────────┘
 BANNER
-    echo -e "${RST}"
+    printf "${RST}\n"
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -105,7 +144,10 @@ load_env() {
         err ".env file not found. Run ./setup.sh first."
         exit 1
     fi
-    set -a; source "$ENV_FILE"; set +a
+    set -a
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
+    set +a
 }
 
 validate_env() {
@@ -116,7 +158,7 @@ validate_env() {
         err "RELAY_PSK must be 64 hex chars (got ${#RELAY_PSK})"; fail=1
     fi
     if [[ -z "${ADMIN_PASSWORD:-}" ]] || [[ "${ADMIN_PASSWORD}" == "change-me"* ]]; then
-        warn "ADMIN_PASSWORD not set or still default — dashboard disabled"
+        warn "ADMIN_PASSWORD not set or still default"
     fi
     return $fail
 }
@@ -132,14 +174,14 @@ ensure_binaries() {
 
     if [[ $need_build -eq 1 ]]; then
         info "Binaries not found — building..."
-        make -C "$SCRIPT_DIR" all --no-print-directory 2>&1 | while IFS= read -r line; do
+        if make -C "$SCRIPT_DIR" all --no-print-directory 2>&1 | while IFS= read -r line; do
             dim "$line"
-        done
-        if [[ ! -x "$SERVER_BIN" ]] || [[ ! -x "$CLIENT_BIN" ]]; then
+        done; then
+            ok "Build complete"
+        else
             err "Build failed. Run 'make' manually to see errors."
             exit 1
         fi
-        ok "Build complete"
     else
         ok "Binaries ready"
     fi
@@ -164,18 +206,19 @@ start_server() {
     nohup "$SERVER_BIN" > "$SERVER_LOG" 2>&1 &
 
     echo $! > "$SERVER_PID"
-    sleep 0.5
+    sleep 0.8
 
     if is_running "$SERVER_PID"; then
         ok "Exit node started (PID $(cat "$SERVER_PID"))"
         dim "Relay    → http://localhost:${PORT:-8080}${RELAY_PATH:-/relay}"
         dim "Health   → http://localhost:${PORT:-8080}/health"
         dim "Admin    → http://localhost:${PORT:-8080}/admin/"
-        dim "pprof    → http://localhost:${PORT:-8080}/debug/pprof/"
         dim "Logs     → ${SERVER_LOG}"
     else
         err "Server failed to start. Check: ${SERVER_LOG}"
-        [[ -f "$SERVER_LOG" ]] && tail -5 "$SERVER_LOG" | while IFS= read -r l; do dim "$l"; done
+        if [[ -f "$SERVER_LOG" ]]; then
+            tail -5 "$SERVER_LOG" | while IFS= read -r l; do dim "$l"; done
+        fi
         return 1
     fi
 }
@@ -194,7 +237,7 @@ start_client() {
     fi
 
     local node_count
-    node_count=$(echo "$gas" | tr ',' '\n' | grep -c '.')
+    node_count=$(echo "$gas" | tr ',' '\n' | grep -c '.' || true)
 
     info "Starting SOCKS5 client on :1080..."
 
@@ -208,26 +251,45 @@ start_client() {
     if is_running "$CLIENT_PID"; then
         ok "SOCKS5 client started (PID $(cat "$CLIENT_PID"))"
         dim "Proxy    → 127.0.0.1:1080  (SOCKS5)"
-        dim "Scripts  → ${node_count} GAS nodes"
-        dim "Polling  → 3 parallel PULLs"
-        dim "Padding  → 16–512 bytes random"
+        dim "Scripts  → ${node_count} GAS node(s)"
         dim "Logs     → ${CLIENT_LOG}"
     else
         err "Client failed to start. Check: ${CLIENT_LOG}"
-        [[ -f "$CLIENT_LOG" ]] && tail -5 "$CLIENT_LOG" | while IFS= read -r l; do dim "$l"; done
+        if [[ -f "$CLIENT_LOG" ]]; then
+            tail -5 "$CLIENT_LOG" | while IFS= read -r l; do dim "$l"; done
+        fi
         return 1
     fi
 }
 
 launch_desktop() {
+    if is_running "$DESKTOP_PID"; then
+        warn "Desktop already running (PID $(cat "$DESKTOP_PID"))"
+        return 0
+    fi
+
     if ! command -v wails &>/dev/null; then
         err "Wails CLI not installed"
         dim "Install: go install github.com/wailsapp/wails/v2/cmd/wails@latest"
-        return 1
+        return 0
     fi
+
     info "Launching Wails desktop app..."
-    (cd "${SCRIPT_DIR}/desktop" && wails dev) &
-    ok "Desktop app launching in background"
+
+    (cd "${SCRIPT_DIR}/desktop" && wails dev) > "$DESKTOP_LOG" 2>&1 &
+    echo $! > "$DESKTOP_PID"
+    disown 2>/dev/null || true
+    sleep 1
+
+    if is_running "$DESKTOP_PID"; then
+        ok "Desktop app launched (PID $(cat "$DESKTOP_PID"))"
+        dim "Logs → ${DESKTOP_LOG}"
+    else
+        err "Desktop app failed to start"
+        if [[ -f "$DESKTOP_LOG" ]]; then
+            tail -5 "$DESKTOP_LOG" | while IFS= read -r l; do dim "$l"; done
+        fi
+    fi
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -236,29 +298,43 @@ launch_desktop() {
 
 show_status() {
     echo ""
-    echo -e "  ${BD}${W}Component Status${RST}"
+    printf "  ${BD}${W}Component Status${RST}\n"
     sep
+
+    local count=0
 
     # Server
     if is_running "$SERVER_PID"; then
-        local spid; spid=$(cat "$SERVER_PID")
-        local smem; smem=$(ps -o rss= -p "$spid" 2>/dev/null | awk '{printf "%.1f MB", $1/1024}')
-        local sup; sup=$(ps -o etime= -p "$spid" 2>/dev/null | xargs)
-        echo -e "  ${G}●${RST}  ${W}Exit Node Server${RST}   PID ${D}${spid}${RST}  RAM ${D}${smem}${RST}  Up ${D}${sup}${RST}"
+        local spid smem sup
+        spid=$(cat "$SERVER_PID")
+        smem=$(ps -o rss= -p "$spid" 2>/dev/null | awk '{printf "%.1f MB", $1/1024}' || echo "?")
+        sup=$(ps -o etime= -p "$spid" 2>/dev/null | xargs || echo "?")
+        printf "  ${G}●${RST}  ${W}Exit Node Server${RST}   PID ${D}${spid}${RST}  RAM ${D}${smem}${RST}  Up ${D}${sup}${RST}\n"
         dim "   http://localhost:${PORT:-8080}/admin/"
+        count=$((count + 1))
     else
-        echo -e "  ${R}○${RST}  ${D}Exit Node Server    stopped${RST}"
+        printf "  ${R}○${RST}  ${D}Exit Node Server    stopped${RST}\n"
     fi
 
     # Client
     if is_running "$CLIENT_PID"; then
-        local cpid; cpid=$(cat "$CLIENT_PID")
-        local cmem; cmem=$(ps -o rss= -p "$cpid" 2>/dev/null | awk '{printf "%.1f MB", $1/1024}')
-        local cup; cup=$(ps -o etime= -p "$cpid" 2>/dev/null | xargs)
-        echo -e "  ${G}●${RST}  ${W}SOCKS5 Client${RST}      PID ${D}${cpid}${RST}  RAM ${D}${cmem}${RST}  Up ${D}${cup}${RST}"
+        local cpid cmem cup
+        cpid=$(cat "$CLIENT_PID")
+        cmem=$(ps -o rss= -p "$cpid" 2>/dev/null | awk '{printf "%.1f MB", $1/1024}' || echo "?")
+        cup=$(ps -o etime= -p "$cpid" 2>/dev/null | xargs || echo "?")
+        printf "  ${G}●${RST}  ${W}SOCKS5 Client${RST}      PID ${D}${cpid}${RST}  RAM ${D}${cmem}${RST}  Up ${D}${cup}${RST}\n"
         dim "   socks5://127.0.0.1:1080"
+        count=$((count + 1))
     else
-        echo -e "  ${R}○${RST}  ${D}SOCKS5 Client       stopped${RST}"
+        printf "  ${R}○${RST}  ${D}SOCKS5 Client       stopped${RST}\n"
+    fi
+
+    # Desktop
+    if is_running "$DESKTOP_PID"; then
+        local dpid
+        dpid=$(cat "$DESKTOP_PID")
+        printf "  ${G}●${RST}  ${W}Desktop App${RST}        PID ${D}${dpid}${RST}\n"
+        count=$((count + 1))
     fi
 
     sep
@@ -266,15 +342,28 @@ show_status() {
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Stop All
+# Stop
 # ══════════════════════════════════════════════════════════════════════════════
 
 stop_all() {
     echo ""
     info "Stopping all components..."
+    kill_pid "$DESKTOP_PID" "Desktop App"
     kill_pid "$CLIENT_PID" "SOCKS5 Client"
     kill_pid "$SERVER_PID" "Exit Node Server"
     echo ""
+}
+
+stop_server() {
+    kill_pid "$SERVER_PID" "Exit Node Server"
+}
+
+stop_client() {
+    kill_pid "$CLIENT_PID" "SOCKS5 Client"
+}
+
+stop_desktop() {
+    kill_pid "$DESKTOP_PID" "Desktop App"
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -283,13 +372,17 @@ stop_all() {
 
 show_controls() {
     echo ""
-    echo -e "  ${BD}${W}Interactive Controls${RST}"
+    printf "  ${BD}${W}Interactive Controls${RST}\n"
     sep
-    echo -e "  ${C}[d]${RST} Open admin dashboard     ${C}[w]${RST} Launch desktop app"
-    echo -e "  ${C}[s]${RST} Show status              ${C}[l]${RST} Tail server logs"
-    echo -e "  ${C}[r]${RST} Restart all              ${C}[c]${RST} Tail client logs"
-    echo -e "  ${C}[p]${RST} Test proxy (curl)        ${C}[h]${RST} Health check"
-    echo -e "  ${C}[q]${RST} Shutdown & exit"
+    printf "  ${C}d${RST} Open admin dashboard       ${C}w${RST} Launch desktop app\n"
+    printf "  ${C}s${RST} Show status                ${C}l${RST} Tail server logs\n"
+    printf "  ${C}r${RST} Restart all                ${C}c${RST} Tail client logs\n"
+    printf "  ${C}p${RST} Test proxy (curl)          ${C}h${RST} Health check\n"
+    sep
+    printf "  ${Y}1${RST} Kill server                ${Y}2${RST} Kill client\n"
+    printf "  ${Y}3${RST} Kill desktop               ${Y}0${RST} Kill ALL\n"
+    sep
+    printf "  ${C}q${RST} Shutdown & exit            ${C}?${RST} Show this help\n"
     sep
     echo ""
 }
@@ -297,13 +390,21 @@ show_controls() {
 interactive_loop() {
     show_controls
 
+    setup_terminal
+    trap 'restore_terminal; echo ""; stop_all; ok "Goodbye."; echo ""; exit 0' INT TERM EXIT
+
     while true; do
-        echo -ne "  ${C}❯${RST} "
-        # Read a single character without waiting for Enter
-        if read -rsn1 -t 1 key 2>/dev/null; then
-            echo ""
+        # Print prompt once, read with timeout, erase prompt on timeout
+        printf "\r  ${C}❯${RST} Press a key... "
+
+        local key=""
+        if IFS= read -rsn1 -t 2 key 2>/dev/null; then
+            # Erase the prompt line and move to beginning
+            printf "\r\033[K"
+
             case "$key" in
                 d)
+                    info "Opening admin dashboard..."
                     open_browser "http://localhost:${PORT:-8080}/admin/"
                     ;;
                 w)
@@ -331,16 +432,16 @@ interactive_loop() {
                 r)
                     info "Restarting..."
                     stop_all
-                    start_server
-                    start_client
+                    start_server || true
+                    start_client || true
                     show_status
                     ;;
                 p)
                     info "Testing SOCKS5 proxy..."
-                    if curl -s --connect-timeout 5 --socks5 127.0.0.1:1080 \
-                        https://httpbin.org/ip 2>/dev/null; then
-                        echo ""
-                        ok "Proxy working!"
+                    local result
+                    if result=$(curl -s --connect-timeout 5 --socks5 127.0.0.1:1080 \
+                        https://httpbin.org/ip 2>/dev/null); then
+                        ok "Proxy working! Response: ${result}"
                     else
                         err "Proxy test failed — check client logs"
                     fi
@@ -355,6 +456,21 @@ interactive_loop() {
                         err "Server not responding"
                     fi
                     ;;
+                1)
+                    info "Killing server..."
+                    stop_server
+                    ;;
+                2)
+                    info "Killing client..."
+                    stop_client
+                    ;;
+                3)
+                    info "Killing desktop..."
+                    stop_desktop
+                    ;;
+                0)
+                    stop_all
+                    ;;
                 q)
                     echo ""
                     stop_all
@@ -362,24 +478,16 @@ interactive_loop() {
                     echo ""
                     exit 0
                     ;;
-                '?'|h)
+                '?')
                     show_controls
                     ;;
                 *)
-                    # Ignore unknown keys silently
+                    # Ignore unknown keys
                     ;;
             esac
-        fi
-
-        # Check if children are still alive
-        if ! is_running "$SERVER_PID" && ! is_running "$CLIENT_PID"; then
-            # Only warn if we had started them
-            if [[ -f "$SERVER_PID" ]] || [[ -f "$CLIENT_PID" ]]; then
-                echo ""
-                err "All components have exited unexpectedly"
-                warn "Check logs: ${LOG_DIR}/"
-                exit 1
-            fi
+        else
+            # Timeout — erase the prompt and reprint (single-line overwrite)
+            printf "\r\033[K"
         fi
     done
 }
@@ -392,7 +500,7 @@ start_full_stack() {
     banner
     load_env
 
-    echo -e "  ${BD}${W}Preflight Checks${RST}"
+    printf "  ${BD}${W}Preflight Checks${RST}\n"
     sep
 
     if ! validate_env; then exit 1; fi
@@ -404,13 +512,12 @@ start_full_stack() {
 
     sep
     echo ""
-    echo -e "  ${BD}${W}Starting Stack${RST}"
+    printf "  ${BD}${W}Starting Stack${RST}\n"
     sep
 
     start_server || exit 1
     echo ""
 
-    # Only start client if GAS_URLS is configured
     local gas="${GAS_URLS:-}"
     if [[ -n "$gas" ]] && [[ "$gas" != *"YOUR_DEPLOYMENT_ID"* ]]; then
         start_client || true
@@ -420,15 +527,11 @@ start_full_stack() {
     fi
 
     sep
-
     show_status
 
-    echo -e "  ${BD}${G}Stack is running!${RST}"
-    echo -e "  ${D}Configure browser SOCKS5 proxy → 127.0.0.1:1080${RST}"
+    printf "  ${BD}${G}Stack is running!${RST}\n"
+    printf "  ${D}Configure browser SOCKS5 proxy → 127.0.0.1:1080${RST}\n"
     echo ""
-
-    # Trap Ctrl+C for graceful shutdown
-    trap 'echo ""; stop_all; ok "Goodbye."; echo ""; exit 0' INT TERM
 
     interactive_loop
 }
@@ -438,24 +541,26 @@ start_full_stack() {
 # ══════════════════════════════════════════════════════════════════════════════
 
 show_help() {
-    echo -e "${BD}Clever Relay – Local Stack Runner${RST}"
+    printf "${BD}Clever Relay – Local Stack Runner${RST}\n"
     echo ""
-    echo -e "${BD}USAGE:${RST}"
-    echo -e "  ${C}./start.sh${RST}              Start full stack with interactive controls"
-    echo -e "  ${C}./start.sh ${W}<command>${RST}  Run a specific command"
+    printf "${BD}USAGE:${RST}\n"
+    printf "  ${C}./start.sh${RST}              Start full stack with interactive controls\n"
+    printf "  ${C}./start.sh ${W}<command>${RST}  Run a specific command\n"
     echo ""
-    echo -e "${BD}COMMANDS:${RST}"
-    echo -e "  ${C}--server${RST}      Start only the exit node server"
-    echo -e "  ${C}--client${RST}      Start only the SOCKS5 client"
-    echo -e "  ${C}--desktop${RST}     Launch the Wails desktop app"
-    echo -e "  ${C}--dashboard${RST}   Open admin dashboard in browser"
-    echo -e "  ${C}--status${RST}      Show running component status"
-    echo -e "  ${C}--stop${RST}        Stop all running components"
-    echo -e "  ${C}--logs${RST}        Tail both server and client logs"
-    echo -e "  ${C}--help${RST}        Show this help"
+    printf "${BD}COMMANDS:${RST}\n"
+    printf "  ${C}--server${RST}      Start only the exit node server\n"
+    printf "  ${C}--client${RST}      Start only the SOCKS5 client\n"
+    printf "  ${C}--desktop${RST}     Launch the Wails desktop app\n"
+    printf "  ${C}--dashboard${RST}   Open admin dashboard in browser\n"
+    printf "  ${C}--status${RST}      Show running component status\n"
+    printf "  ${C}--stop${RST}        Stop all running components\n"
+    printf "  ${C}--logs${RST}        Tail both server and client logs\n"
+    printf "  ${C}--help${RST}        Show this help\n"
     echo ""
-    echo -e "${BD}INTERACTIVE KEYS:${RST}"
-    echo -e "  ${C}d${RST}=dashboard  ${C}w${RST}=desktop  ${C}s${RST}=status  ${C}l${RST}=logs  ${C}r${RST}=restart  ${C}q${RST}=quit"
+    printf "${BD}INTERACTIVE KEYS:${RST}\n"
+    printf "  ${C}d${RST}=dashboard  ${C}w${RST}=desktop  ${C}s${RST}=status  ${C}l${RST}=logs  ${C}r${RST}=restart\n"
+    printf "  ${Y}1${RST}=kill server  ${Y}2${RST}=kill client  ${Y}3${RST}=kill desktop  ${Y}0${RST}=kill all\n"
+    printf "  ${C}q${RST}=quit\n"
     echo ""
 }
 
@@ -465,33 +570,38 @@ show_help() {
 
 main() {
     cd "$SCRIPT_DIR"
+    mkdir -p "$PID_DIR" "$LOG_DIR"
 
     case "${1:-}" in
         --server|-s)
             banner; load_env; validate_env || exit 1
-            ensure_binaries; mkdir -p "$PID_DIR" "$LOG_DIR"
-            start_server
-            trap 'stop_all; exit 0' INT TERM
-            info "Press Ctrl+C to stop"; tail -f "$SERVER_LOG"
+            ensure_binaries
+            start_server || exit 1
+            trap 'stop_server; exit 0' INT TERM
+            info "Press Ctrl+C to stop"
+            tail -f "$SERVER_LOG" 2>/dev/null
             ;;
         --client|-c)
             banner; load_env; validate_env || exit 1
-            ensure_binaries; mkdir -p "$PID_DIR" "$LOG_DIR"
-            start_client
-            trap 'stop_all; exit 0' INT TERM
-            info "Press Ctrl+C to stop"; tail -f "$CLIENT_LOG"
+            ensure_binaries
+            start_client || exit 1
+            trap 'stop_client; exit 0' INT TERM
+            info "Press Ctrl+C to stop"
+            tail -f "$CLIENT_LOG" 2>/dev/null
             ;;
         --desktop|-w)
-            banner; load_env; launch_desktop
+            banner; load_env
+            launch_desktop
             ;;
         --dashboard|-d)
-            load_env; open_browser "http://localhost:${PORT:-8080}/admin/"
+            load_env
+            open_browser "http://localhost:${PORT:-8080}/admin/"
             ;;
         --status)
-            banner; load_env; show_status
+            load_env; show_status
             ;;
         --stop)
-            banner; stop_all
+            stop_all
             ;;
         --logs)
             info "Tailing all logs (Ctrl+C to stop)..."
@@ -504,7 +614,10 @@ main() {
             start_full_stack
             ;;
         *)
-            err "Unknown command: $1"; echo ""; show_help; exit 1
+            err "Unknown command: $1"
+            echo ""
+            show_help
+            exit 1
             ;;
     esac
 }
