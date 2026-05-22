@@ -190,6 +190,13 @@ func (p *GASPool) dispatchToNode(node *GASNode, data []byte, isBatch bool) ([]by
 
 	if resp.StatusCode >= 400 {
 		p.markFailure(node, resp.StatusCode)
+		// Log response details for debugging GAS/redirect issues
+		bodySnippet := string(body)
+		if len(bodySnippet) > 200 {
+			bodySnippet = bodySnippet[:200] + "..."
+		}
+		log.Printf("[pool] HTTP %d from %s (final_url=%s, body=%q)",
+			resp.StatusCode, node.URL, resp.Request.URL.String(), bodySnippet)
 		return body, fmt.Errorf("HTTP %d from GAS node %s", resp.StatusCode, node.URL)
 	}
 

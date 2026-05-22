@@ -88,8 +88,11 @@ func NewH2Transport() *H2Transport {
 
 // dialWithCleanIP overrides DNS resolution for Google domains, routing
 // connections through the fastest IP discovered by the background scanner.
-// We set the TLS ServerName to the original hostname so certificate
-// verification succeeds even when connecting to a raw IP.
+//
+// IMPORTANT: script.google.com and script.googleusercontent.com are EXCLUDED
+// from clean IP routing. GAS scripts require Google's dedicated Apps Script
+// infrastructure — random Google CDN IPs (YouTube, Gmail edges) return 405
+// because they don't serve GAS execution endpoints.
 func (h *H2Transport) dialWithCleanIP(ctx context.Context, network, addr string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -97,18 +100,16 @@ func (h *H2Transport) dialWithCleanIP(ctx context.Context, network, addr string)
 		port = "443"
 	}
 
-	// Only override for Google domains (script.google.com and its redirects)
-	if strings.HasSuffix(host, ".google.com") || strings.HasSuffix(host, ".googleapis.com") {
+	// Only override for non-GAS Google domains.
+	// script.google.com MUST resolve through real DNS because GAS scripts
+	// are served by dedicated infrastructure, not generic Google CDN nodes.
+	// script.googleusercontent.com is the redirect target for GAS execution.
+	if isCleanIPEligible(host) {
 		bestIPs := h.scanner.BestIPs(3)
 		if len(bestIPs) > 0 {
 			// Pick a random IP from the top 3 to distribute load
 			chosenIP := bestIPs[rand.Intn(len(bestIPs))]
 			addr = net.JoinHostPort(chosenIP, port)
-
-			// Preserve the original hostname for TLS certificate verification.
-			// Without this, the handshake fails when connecting to a raw IP
-			// because the cert is issued for *.google.com, not the IP.
-			h.transport.TLSClientConfig.ServerName = host
 		}
 	}
 
@@ -117,6 +118,20 @@ func (h *H2Transport) dialWithCleanIP(ctx context.Context, network, addr string)
 		KeepAlive: 30 * time.Second,
 	}
 	return dialer.DialContext(ctx, network, addr)
+}
+
+// isCleanIPEligible returns true if the host should use scanned Google IPs.
+// GAS-related domains are excluded because they require dedicated infrastructure.
+func isCleanIPEligible(host string) bool {
+	// NEVER route GAS domains through clean IPs
+	if host == "script.google.com" ||
+		strings.HasSuffix(host, ".googleusercontent.com") {
+		return false
+	}
+
+	// Route other Google domains through clean IPs (for domain fronting, etc.)
+	return strings.HasSuffix(host, ".google.com") ||
+		strings.HasSuffix(host, ".googleapis.com")
 }
 
 // Transport returns the underlying http.Transport for use with http.Client.
