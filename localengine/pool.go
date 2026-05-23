@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -63,31 +62,12 @@ func NewGASPool(urls []string, transport *H2Transport) *GASPool {
 		transport: transport,
 		client: &http.Client{
 			Transport: transport.Transport(),
-			Timeout:   55 * time.Second, // just under GAS 60s limit
+			Timeout:   55 * time.Second,
+			// HALT automatic redirects. We handle 302s manually to preserve POST integrity.
+			// Go's auto-redirect zeroes ContentLength on POST→302, causing HTTP/2 405s
+			// on Google's strict edge servers.
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				if len(via) >= 10 {
-					return errors.New("too many redirects")
-				}
-				// Google Apps Script uses 302 redirects to route POST requests
-				// to the execution endpoint. Go's http.Client converts POST→GET
-				// on 302 by default, causing a 405 at the final URL.
-				//
-				// We must preserve: method, body, Content-Type, and User-Agent
-				// across the ENTIRE redirect chain.
-				orig := via[0]
-				if orig.Method == http.MethodPost {
-					req.Method = http.MethodPost
-					if orig.GetBody != nil {
-						body, err := orig.GetBody()
-						if err == nil {
-							req.Body = body
-						}
-					}
-					// Preserve critical headers that Go strips on redirect
-					req.Header.Set("Content-Type", orig.Header.Get("Content-Type"))
-					req.Header.Set("User-Agent", orig.Header.Get("User-Agent"))
-				}
-				return nil
+				return http.ErrUseLastResponse
 			},
 		},
 	}
@@ -155,21 +135,41 @@ func (p *GASPool) dispatchToNode(node *GASNode, data []byte, isBatch bool) ([]by
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
 
-	// IMPORTANT: Use text/plain, not application/octet-stream!
-	// The payload is Base64-encoded text. GAS's doPost only processes
-	// POST requests with text-compatible Content-Types. Sending
-	// octet-stream causes a 405 on some ISPs/proxy redirect chains.
 	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 
-	// Set GetBody for redirect preservation
-	bodyBytes := data
-	req.GetBody = func() (io.ReadCloser, error) {
-		return io.NopCloser(bytes.NewReader(bodyBytes)), nil
-	}
-
 	start := time.Now()
 	resp, err := p.client.Do(req)
+
+	// ── MANUAL REDIRECT INTERCEPTOR ──────────────────────────────────────
+	// Go's auto-redirect zeroes ContentLength on POST→302, causing 405s on
+	// Google's HTTP/2 edge. We halt the redirect above and re-fire a pristine
+	// POST here with the correct Content-Length (set automatically by
+	// bytes.NewReader).
+	if err == nil && (resp.StatusCode == 302 || resp.StatusCode == 303 || resp.StatusCode == 307) {
+		location := resp.Header.Get("Location")
+		resp.Body.Close() // clean up the redirect response body
+
+		if location == "" {
+			p.markFailure(node, resp.StatusCode)
+			return nil, fmt.Errorf("GAS redirect missing Location header")
+		}
+
+		log.Printf("[pool] manual redirect: %s → %s", url, location)
+
+		// Create a pristine new POST request — bytes.NewReader automatically
+		// sets ContentLength, which is critical for HTTP/2 compliance.
+		newReq, err := http.NewRequest(http.MethodPost, location, bytes.NewReader(data))
+		if err != nil {
+			return nil, fmt.Errorf("creating redirect request: %w", err)
+		}
+		newReq.Header.Set("Content-Type", "text/plain; charset=utf-8")
+		newReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+
+		// Fire the execution request to the redirect target
+		resp, err = p.client.Do(newReq)
+	}
+
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -195,8 +195,8 @@ func (p *GASPool) dispatchToNode(node *GASNode, data []byte, isBatch bool) ([]by
 		if len(bodySnippet) > 200 {
 			bodySnippet = bodySnippet[:200] + "..."
 		}
-		log.Printf("[pool] HTTP %d from %s (final_url=%s, body=%q)",
-			resp.StatusCode, node.URL, resp.Request.URL.String(), bodySnippet)
+		log.Printf("[pool] HTTP %d from %s (body=%q)",
+			resp.StatusCode, node.URL, bodySnippet)
 		return body, fmt.Errorf("HTTP %d from GAS node %s", resp.StatusCode, node.URL)
 	}
 

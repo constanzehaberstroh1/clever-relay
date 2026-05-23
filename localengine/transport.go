@@ -171,17 +171,18 @@ func NewH2Transport() *H2Transport {
 }
 
 // dialWithCleanIP overrides DNS resolution for Google-owned domains, routing
-// connections through the fastest IP discovered by the background scanner.
+// connections through known-good IPs to bypass DNS poisoning.
 //
 // WHY THIS IS CRITICAL:
 // In censored networks (Iran, China, etc.), system DNS is poisoned:
 //   nslookup script.google.com → 192.168.52.89 (local router!)
 //
-// We MUST bypass DNS entirely and use hardcoded/scanned IPs for ALL Google
-// traffic — especially GAS domains which are our relay endpoints.
+// We MUST bypass DNS entirely for ALL Google traffic.
 //
-// For GAS domains specifically, we use BestIPs() which only returns IPs
-// verified to serve GAS traffic (they return 302, not 405).
+// For GAS domains (script.google.com, *.googleusercontent.com), we ALWAYS use
+// hardcoded App Engine IPs (216.239.x.x). The scanner's generic CDN IPs
+// (142.250.x.x) don't run the App Engine execution environment and will reject
+// POST requests with 405.
 // For other Google domains, we use AllAliveIPs() which returns any reachable IP.
 func (h *H2Transport) dialWithCleanIP(ctx context.Context, network, addr string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(addr)
@@ -191,22 +192,16 @@ func (h *H2Transport) dialWithCleanIP(ctx context.Context, network, addr string)
 	}
 
 	if isGASDomain(host) {
-		// GAS domains → use ONLY verified GAS-capable IPs from scanner.
-		// These IPs have been probed with HEAD Host:script.google.com and
-		// confirmed to return 302 (not 405 like YouTube/Gmail CDN edges).
-		bestIPs := h.scanner.BestIPs(3)
-		if len(bestIPs) > 0 {
-			chosenIP := bestIPs[rand.Intn(len(bestIPs))]
-			log.Printf("[transport] GAS domain %s → scanned IP %s (DNS bypass)", host, chosenIP)
-			addr = net.JoinHostPort(chosenIP, port)
-		} else {
-			// Fallback: use hardcoded App Engine IP when scanner hasn't run yet
-			fallbackIP := gasFallbackIP()
-			log.Printf("[transport] GAS domain %s → fallback IP %s (scanner empty)", host, fallbackIP)
-			addr = net.JoinHostPort(fallbackIP, port)
-		}
+		// FIX: Strictly force App Engine IPs (216.239.x.x) for GAS domains.
+		// Generic CDN IPs (like 142.250.x.x from the scanner) will reject the
+		// execution POST with a 405 because they don't run the App Engine
+		// execution environment. Apps Script payloads MUST terminate at App
+		// Engine infrastructure.
+		forcedIP := gasFallbackIP()
+		log.Printf("[transport] GAS domain %s → forced App Engine IP %s (DNS bypass)", host, forcedIP)
+		addr = net.JoinHostPort(forcedIP, port)
 	} else if isGoogleOwned(host) {
-		// Other Google domains → use any alive scanned IPs for domain fronting.
+		// Safe to use generic alive IPs for non-execution domain fronting
 		allIPs := h.scanner.AllAliveIPs(3)
 		if len(allIPs) > 0 {
 			chosenIP := allIPs[rand.Intn(len(allIPs))]
