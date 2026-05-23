@@ -209,10 +209,11 @@ func (ss *SessionStore) Create(id [16]byte, target string) *Session {
 	}
 
 	s := &Session{
-		ID:        id,
-		Target:    target,
-		CreatedAt: time.Now(),
-		LastUsed:  time.Now(),
+		ID:         id,
+		Target:     target,
+		CreatedAt:  time.Now(),
+		LastUsed:   time.Now(),
+		upExpected: 1, // Start expecting sequence number 1 for CmdTCPData packets
 	}
 	ss.sessions.Store(id, s)
 	ss.mu.Lock()
