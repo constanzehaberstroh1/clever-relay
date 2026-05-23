@@ -239,20 +239,20 @@ start_client() {
     local node_count
     node_count=$(echo "$gas" | tr ',' '\n' | grep -c '.' || true)
 
-    info "Starting SOCKS5 client on :1080 + HTTP proxy on :8080..."
+    info "Starting SOCKS5 client on :4046 + HTTP proxy on :9096..."
 
     RELAY_PSK="${RELAY_PSK}" \
     GAS_URLS="${gas}" \
     PANEL_ADDR="127.0.0.1:9090" \
-    nohup "$CLIENT_BIN" -listen ":1080" -http-proxy ":8080" -panel "127.0.0.1:9090" -psk "$RELAY_PSK" -gas-urls "$gas" > "$CLIENT_LOG" 2>&1 &
+    nohup "$CLIENT_BIN" -listen ":4046" -http-proxy ":9096" -panel "127.0.0.1:9090" -psk "$RELAY_PSK" -gas-urls "$gas" > "$CLIENT_LOG" 2>&1 &
 
     echo $! > "$CLIENT_PID"
     sleep 0.5
 
     if is_running "$CLIENT_PID"; then
         ok "Client engine started (PID $(cat "$CLIENT_PID"))"
-        dim "SOCKS5   → 127.0.0.1:1080"
-        dim "HTTP     → 127.0.0.1:8080"
+        dim "SOCKS5   → 127.0.0.1:4046"
+        dim "HTTP     → 127.0.0.1:9096"
         dim "Panel    → http://127.0.0.1:9090"
         dim "Scripts  → ${node_count} GAS node(s)"
         dim "Logs     → ${CLIENT_LOG}"
@@ -326,7 +326,7 @@ show_status() {
         cmem=$(ps -o rss= -p "$cpid" 2>/dev/null | awk '{printf "%.1f MB", $1/1024}' || echo "?")
         cup=$(ps -o etime= -p "$cpid" 2>/dev/null | xargs || echo "?")
         printf "  ${G}●${RST}  ${W}Client Engine${RST}       PID ${D}${cpid}${RST}  RAM ${D}${cmem}${RST}  Up ${D}${cup}${RST}\n"
-        dim "   socks5://127.0.0.1:1080  |  http://127.0.0.1:8080"
+        dim "   socks5://127.0.0.1:4046  |  http://127.0.0.1:9096"
         count=$((count + 1))
     else
         printf "  ${R}○${RST}  ${D}SOCKS5 Client       stopped${RST}\n"
@@ -448,14 +448,14 @@ interactive_loop() {
                     info "Testing proxies..."
                     local result
                     # Test SOCKS5
-                    if result=$(curl -s --connect-timeout 5 --socks5 127.0.0.1:1080 \
+                    if result=$(curl -s --connect-timeout 5 --socks5 127.0.0.1:4046 \
                         https://httpbin.org/ip 2>/dev/null); then
                         ok "SOCKS5 working! Response: ${result}"
                     else
                         err "SOCKS5 test failed — check client logs"
                     fi
                     # Test HTTP proxy
-                    if result=$(curl -s --connect-timeout 5 --proxy http://127.0.0.1:8080 \
+                    if result=$(curl -s --connect-timeout 5 --proxy http://127.0.0.1:9096 \
                         https://httpbin.org/ip 2>/dev/null); then
                         ok "HTTP proxy working! Response: ${result}"
                     else
@@ -546,7 +546,7 @@ start_full_stack() {
     show_status
 
     printf "  ${BD}${G}Stack is running!${RST}\n"
-    printf "  ${D}SOCKS5 proxy → 127.0.0.1:1080  |  HTTP proxy → 127.0.0.1:8080${RST}\n"
+    printf "  ${D}SOCKS5 proxy → 127.0.0.1:4046  |  HTTP proxy → 127.0.0.1:9096${RST}\n"
     echo ""
 
     interactive_loop

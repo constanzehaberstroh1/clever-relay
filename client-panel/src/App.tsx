@@ -117,7 +117,7 @@ function DashboardPage() {
           <span className={`stat-value ${status?.socks5_active ? 'green' : ''}`}>
             {status?.socks5_active ? '● Online' : '○ Offline'}
           </span>
-          <span className="stat-sub">{status?.socks5_addr || ':1080'}</span>
+          <span className="stat-sub">{status?.socks5_addr || ':4046'}</span>
         </div>
 
         <div className="card stat-card">

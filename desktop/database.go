@@ -34,7 +34,7 @@ func (m *GASNodeModel) BeforeCreate(tx *gorm.DB) error {
 // SettingsModel stores application preferences in SQLite.
 type SettingsModel struct {
 	ID                 uint   `gorm:"primaryKey" json:"id"`
-	SocksAddr          string `gorm:"default:':1080'" json:"socks_addr"`
+	SocksAddr          string `gorm:"default:':4046'" json:"socks_addr"`
 	PSK                string `gorm:"default:''" json:"psk"`
 	GoogleClientID     string `gorm:"default:''" json:"google_client_id"`
 	GoogleClientSecret string `gorm:"default:''" json:"google_client_secret"`
@@ -61,7 +61,7 @@ func SetupDatabase() (*gorm.DB, error) {
 	if count == 0 {
 		defaultSettings := SettingsModel{
 			ID:        1,
-			SocksAddr: ":1080",
+			SocksAddr: ":4046",
 			PSK:       "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", // Default dummy PSK
 		}
 		db.Create(&defaultSettings)

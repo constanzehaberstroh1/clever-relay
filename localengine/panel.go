@@ -98,7 +98,7 @@ func NewPanelServer(addr string, pool *GASPool, socks *SOCKS5Server, logger *dat
 			MaxRetries:   3,
 			Timeout:      55,
 			ParallelPull: 3,
-			SocksAddr:    ":1080",
+			SocksAddr:    ":4046",
 		},
 	}
 }

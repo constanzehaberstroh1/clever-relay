@@ -68,20 +68,19 @@ func NewHTTPProxyServer(addr, socksAddr string, logger *dataengine.Logger) *HTTP
 }
 
 // ListenAndServe starts the HTTP proxy server.
-// It first checks if the port is available, then creates a SOCKS5 dialer
-// and begins accepting connections.
+// It binds to the port, creates a SOCKS5 dialer, and begins accepting connections.
 func (h *HTTPProxyServer) ListenAndServe() error {
-	// Check port availability before starting
+	// Bind to the port directly to prevent port occupation race conditions
 	ln, err := net.Listen("tcp", h.addr)
 	if err != nil {
 		h.logger.Errorf("http-proxy", "Port %s is occupied: %v", h.addr, err)
 		return fmt.Errorf("HTTP proxy port %s unavailable: %w", h.addr, err)
 	}
-	ln.Close()
 
 	// Create SOCKS5 dialer that routes through our tunnel engine
 	socks5Dialer, err := proxy.SOCKS5("tcp", h.socksAddr, nil, proxy.Direct)
 	if err != nil {
+		ln.Close()
 		return fmt.Errorf("creating SOCKS5 dialer for %s: %w", h.socksAddr, err)
 	}
 	h.dialer = socks5Dialer
@@ -109,7 +108,7 @@ func (h *HTTPProxyServer) ListenAndServe() error {
 	h.logger.Infof("http-proxy", "HTTP proxy listening on %s (via SOCKS5 %s)", h.addr, h.socksAddr)
 	log.Printf("[http-proxy] listening on %s (via SOCKS5 %s)", h.addr, h.socksAddr)
 
-	return h.server.ListenAndServe()
+	return h.server.Serve(ln)
 }
 
 // ServeHTTP dispatches incoming requests to the appropriate handler.

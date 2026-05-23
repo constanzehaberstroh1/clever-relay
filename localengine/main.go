@@ -35,8 +35,8 @@ var (
 
 func main() {
 	// ── CLI Flags ────────────────────────────────────────────────────────
-	socksAddr := flag.String("listen", ":1080", "SOCKS5 listen address")
-	httpAddr := flag.String("http-proxy", ":8080", "HTTP/HTTPS proxy listen address (set to empty to disable)")
+	socksAddr := flag.String("listen", ":4046", "SOCKS5 listen address")
+	httpAddr := flag.String("http-proxy", ":9096", "HTTP/HTTPS proxy listen address (set to empty to disable)")
 	panelAddr := flag.String("panel", "127.0.0.1:9090", "Admin panel listen address")
 	pskHex := flag.String("psk", "", "Pre-shared key (64 hex chars = 32 bytes)")
 	gasURLs := flag.String("gas-urls", "", "Comma-separated Google Apps Script URLs")
@@ -91,6 +91,9 @@ func main() {
 		log.Printf("[WARN] Could not create log directory/file: %v", err)
 	}
 
+	// Redirect standard library logging to our async logger
+	dataengine.RedirectStandardLog(logger)
+
 	// Phase 5: H2Transport now starts a background IP scanner automatically
 	transport := NewH2Transport()
 	pool := NewGASPool(urls, transport)
@@ -123,21 +126,21 @@ func main() {
 	logger.Info("startup", "Scanner: Active (5 min interval)")
 	logger.Info("startup", "Polling: Reverse (3 parallel)")
 
-	log.Printf("╔══════════════════════════════════════════════════╗")
-	log.Printf("║   Clever Relay – Local Client (Phase 10)        ║")
-	log.Printf("╠══════════════════════════════════════════════════╣")
-	log.Printf("║ SOCKS5   : %-37s ║", *socksAddr)
+	fmt.Println("╔══════════════════════════════════════════════════╗")
+	fmt.Println("║   Clever Relay – Local Client (Phase 10)        ║")
+	fmt.Println("╠══════════════════════════════════════════════════╣")
+	fmt.Printf("║ SOCKS5   : %-37s ║\n", *socksAddr)
 	if httpProxy != nil {
-		log.Printf("║ HTTP     : %-37s ║", *httpAddr)
+		fmt.Printf("║ HTTP     : %-37s ║\n", *httpAddr)
 	}
-	log.Printf("║ Panel    : %-37s ║", fmt.Sprintf("http://%s", *panelAddr))
-	log.Printf("║ GAS Pool : %-37s ║", fmt.Sprintf("%d scripts", len(urls)))
-	log.Printf("║ Scanner  : %-37s ║", "App Engine Targeted (5 min)")
-	log.Printf("║ Padding  : %-37s ║", "16–512 bytes random")
-	log.Printf("║ Polling  : %-37s ║", "Reverse (3 parallel)")
-	log.Printf("║ Split    : %-37s ║", fmt.Sprintf("%d direct-route domains", len(directRoutingDomains)))
-	log.Printf("║ ConnPool : %-37s ║", "10 TLS conns, 120s idle")
-	log.Printf("╚══════════════════════════════════════════════════╝")
+	fmt.Printf("║ Panel    : %-37s ║\n", fmt.Sprintf("http://%s", *panelAddr))
+	fmt.Printf("║ GAS Pool : %-37s ║\n", fmt.Sprintf("%d scripts", len(urls)))
+	fmt.Printf("║ Scanner  : %-37s ║\n", "App Engine Targeted (5 min)")
+	fmt.Printf("║ Padding  : %-37s ║\n", "16–512 bytes random")
+	fmt.Printf("║ Polling  : %-37s ║\n", "Reverse (3 parallel)")
+	fmt.Printf("║ Split    : %-37s ║\n", fmt.Sprintf("%d direct-route domains", len(directRoutingDomains)))
+	fmt.Printf("║ ConnPool : %-37s ║\n", "10 TLS conns, 120s idle")
+	fmt.Println("╚══════════════════════════════════════════════════╝")
 
 	go func() {
 		if err := socks.ListenAndServe(); err != nil {

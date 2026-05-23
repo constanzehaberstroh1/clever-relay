@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +28,7 @@ type App struct {
 	gasPool      *localengine.GASPool
 	chunker      *localengine.Chunker
 	transport    *localengine.H2Transport
+	logger       *dataengine.Logger
 }
 
 // NewApp creates a new App struct.
@@ -214,6 +216,19 @@ func (a *App) StartProxy() error {
 		return fmt.Errorf("failed to init encryption protocol: %w", err)
 	}
 
+	// Initialize logger for desktop proxy engine
+	a.logger = dataengine.NewLogger(dataengine.DefaultQueueSize, dataengine.DefaultRingSize)
+	a.logger.AddSink(dataengine.NewConsoleSink(true))
+
+	// File output with daily rotation + automatic 7-day retention in ./logs
+	if fileSink, err := dataengine.NewFileSink("./logs", "desktop_client"); err == nil {
+		a.logger.AddSink(fileSink)
+	} else {
+		log.Printf("[WARN] Could not create log directory/file: %v", err)
+	}
+
+	dataengine.RedirectStandardLog(a.logger)
+
 	// Start local engine components
 	a.transport = localengine.NewH2Transport()
 	a.gasPool = localengine.NewGASPool(urls, a.transport)
@@ -256,6 +271,14 @@ func (a *App) StopProxy() error {
 	a.gasPool = nil
 	a.transport = nil
 	a.proxyRunning = false
+
+	if a.logger != nil {
+		a.logger.Close()
+		a.logger = nil
+	}
+	// Restore standard library logger to default stderr
+	log.SetOutput(os.Stderr)
+	log.SetFlags(log.LstdFlags)
 
 	log.Println("[proxy] SOCKS5 proxy stopped successfully.")
 	return nil

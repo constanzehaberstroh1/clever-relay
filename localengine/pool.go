@@ -157,16 +157,14 @@ func (p *GASPool) dispatchToNode(node *GASNode, data []byte, isBatch bool) ([]by
 
 		log.Printf("[pool] manual redirect: %s → %s", url, location)
 
-		// Create a pristine new POST request — bytes.NewReader automatically
-		// sets ContentLength, which is critical for HTTP/2 compliance.
-		newReq, err := http.NewRequest(http.MethodPost, location, bytes.NewReader(data))
+		// Create a GET request to fetch the script execution output (without a body)
+		newReq, err := http.NewRequest(http.MethodGet, location, nil)
 		if err != nil {
 			return nil, fmt.Errorf("creating redirect request: %w", err)
 		}
-		newReq.Header.Set("Content-Type", "text/plain; charset=utf-8")
 		newReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 
-		// Fire the execution request to the redirect target
+		// Fire the fetch request to the redirect target
 		resp, err = p.client.Do(newReq)
 	}
 

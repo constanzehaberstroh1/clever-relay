@@ -60,7 +60,7 @@ function App() {
   const [status, setStatus] = useState<ProxyStatus | null>(null);
   const [nodes, setNodes] = useState<GASNode[]>([]);
   const [settings, setSettings] = useState<Settings>({
-    socks_addr: ':1080',
+    socks_addr: ':4046',
     psk: '',
     google_client_id: '',
     google_client_secret: '',
@@ -403,7 +403,7 @@ function App() {
                     type="text"
                     value={socksAddrInput}
                     onChange={e => setSocksAddrInput(e.target.value)}
-                    placeholder=":1080"
+                    placeholder=":4046"
                     required
                   />
                 </div>

@@ -64,20 +64,6 @@ func ValidateGASNode(gasURL string, psk []byte) ValidationResult {
 
 	client := &http.Client{
 		Timeout: 15 * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			// Google scripts perform redirects (302)
-			if len(via) >= 10 {
-				return fmt.Errorf("too many redirects")
-			}
-			if len(via) > 0 && via[0].Method == http.MethodPost {
-				req.Method = http.MethodPost
-				if via[0].GetBody != nil {
-					body, _ := via[0].GetBody()
-					req.Body = body
-				}
-			}
-			return nil
-		},
 	}
 
 	u, _ := url.Parse(gasURL)

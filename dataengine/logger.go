@@ -2,6 +2,8 @@ package dataengine
 
 import (
 	"fmt"
+	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -396,4 +398,56 @@ func (rb *RingBuffer) CloseSubscribers() {
 	}
 	rb.subscribers = nil
 	rb.subMu.Unlock()
+}
+
+// LogForwarder redirects standard library log calls to a dataengine.Logger.
+type LogForwarder struct {
+	logger *Logger
+}
+
+// Write implements io.Writer, routing standard log lines to the dataengine.Logger.
+func (f *LogForwarder) Write(p []byte) (n int, err error) {
+	msg := string(p)
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		return len(p), nil
+	}
+
+	// Default levels and components
+	component := "system"
+	level := LevelInfo
+
+	// Strip out date/time if standard logger has it enabled
+	// E.g. "2026/05/23 13:00:53 [socks5] new session"
+	// Date pattern is "YYYY/MM/DD HH:MM:SS" (19 chars)
+	if len(msg) >= 20 && msg[4] == '/' && msg[7] == '/' && msg[10] == ' ' && msg[13] == ':' && msg[16] == ':' {
+		msg = strings.TrimSpace(msg[19:])
+	}
+
+	// Check for component bracket prefix, e.g., "[socks5]"
+	if strings.HasPrefix(msg, "[") {
+		if idx := strings.Index(msg, "]"); idx > 0 {
+			component = msg[1:idx]
+			msg = strings.TrimSpace(msg[idx+1:])
+		}
+	}
+
+	// Detect log level based on common keywords
+	lower := strings.ToLower(msg)
+	if strings.Contains(lower, "error") || strings.Contains(lower, "fail") || strings.Contains(lower, "fatal") || strings.Contains(lower, "occupied") || strings.Contains(lower, "unavailable") {
+		level = LevelError
+	} else if strings.Contains(lower, "warning") || strings.Contains(lower, "cooldown") {
+		level = LevelWarn
+	}
+
+	f.logger.Log(level, component, msg)
+	return len(p), nil
+}
+
+// RedirectStandardLog configures Go's standard log package to route all messages
+// through the provided dataengine.Logger. It also sets standard log flags to 0
+// to avoid duplicating timestamps, allowing the Logger's sinks to format them.
+func RedirectStandardLog(logger *Logger) {
+	log.SetFlags(0)
+	log.SetOutput(&LogForwarder{logger: logger})
 }

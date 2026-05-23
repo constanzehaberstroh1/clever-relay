@@ -2,7 +2,6 @@ package localengine
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -64,31 +63,6 @@ func NewGASPool(urls []string, transport *H2Transport) *GASPool {
 		client: &http.Client{
 			Transport: transport.Transport(),
 			Timeout:   55 * time.Second, // just under GAS 60s limit
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				if len(via) >= 10 {
-					return errors.New("too many redirects")
-				}
-				// Google Apps Script uses 302 redirects to route POST requests
-				// to the execution endpoint. Go's http.Client converts POST→GET
-				// on 302 by default, causing a 405 at the final URL.
-				//
-				// We must preserve: method, body, Content-Type, and User-Agent
-				// across the ENTIRE redirect chain.
-				orig := via[0]
-				if orig.Method == http.MethodPost {
-					req.Method = http.MethodPost
-					if orig.GetBody != nil {
-						body, err := orig.GetBody()
-						if err == nil {
-							req.Body = body
-						}
-					}
-					// Preserve critical headers that Go strips on redirect
-					req.Header.Set("Content-Type", orig.Header.Get("Content-Type"))
-					req.Header.Set("User-Agent", orig.Header.Get("User-Agent"))
-				}
-				return nil
-			},
 		},
 	}
 	return pool

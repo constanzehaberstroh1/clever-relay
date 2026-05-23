@@ -51,17 +51,22 @@ func TestFileSinkDailyRotation(t *testing.T) {
 func TestFileSinkRetentionPolicy(t *testing.T) {
 	dir := t.TempDir()
 
-	// Create fake old log files
-	oldFiles := []string{
-		"app_2026-05-01.log", // 21 days old
-		"app_2026-05-10.log", // 12 days old
-		"app_2026-05-15.log", // 7 days old (on boundary)
-		"app_2026-05-20.log", // 2 days old — should survive
-		"app_2026-05-21.log", // 1 day old — should survive
-		"other_2026-05-01.log", // different prefix — should survive
-		"random.txt",            // not a log file — should survive
-	}
-	for _, name := range oldFiles {
+	now := time.Now()
+
+	// Create fake log files dynamically
+	// retentionDays is 3
+	// Files that should be deleted (> 3 days old):
+	del1 := fmt.Sprintf("app_%s.log", now.AddDate(0, 0, -10).Format("2006-01-02")) // 10 days old
+	del2 := fmt.Sprintf("app_%s.log", now.AddDate(0, 0, -4).Format("2006-01-02"))  // 4 days old
+
+	// Files that should survive (<= 3 days old, or different prefix, or not a log):
+	keep1 := fmt.Sprintf("app_%s.log", now.AddDate(0, 0, -2).Format("2006-01-02")) // 2 days old
+	keep2 := fmt.Sprintf("app_%s.log", now.AddDate(0, 0, -1).Format("2006-01-02")) // 1 day old
+	keep3 := fmt.Sprintf("other_%s.log", now.AddDate(0, 0, -10).Format("2006-01-02")) // different prefix
+	keep4 := "random.txt"
+
+	allFiles := []string{del1, del2, keep1, keep2, keep3, keep4}
+	for _, name := range allFiles {
 		os.WriteFile(filepath.Join(dir, name), []byte("log data"), 0644)
 	}
 
@@ -84,27 +89,18 @@ func TestFileSinkRetentionPolicy(t *testing.T) {
 	}
 
 	// Should be deleted (> 3 days old with "app" prefix)
-	for _, shouldDelete := range []string{
-		"app_2026-05-01.log",
-		"app_2026-05-10.log",
-		"app_2026-05-15.log",
-	} {
+	for _, shouldDelete := range []string{del1, del2} {
 		if survivors[shouldDelete] {
 			t.Errorf("file %s should have been deleted (retention policy)", shouldDelete)
 		}
 	}
 
 	// Should survive (recent, different prefix, or not a log)
-	for _, shouldSurvive := range []string{
-		"app_2026-05-20.log",
-		"app_2026-05-21.log",
-		"other_2026-05-01.log",
-		"random.txt",
-	} {
+	for _, shouldSurvive := range []string{keep1, keep2, keep3, keep4} {
 		if !survivors[shouldSurvive] {
 			t.Errorf("file %s should have survived retention policy", shouldSurvive)
 		}
 	}
 
-	t.Logf("Retention test: %d files survived out of %d", len(survivors), len(oldFiles))
+	t.Logf("Retention test: %d files survived out of %d", len(survivors), len(allFiles))
 }

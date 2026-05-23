@@ -37,6 +37,19 @@ var googleSNIs = []string{
 	"photos.google.com",
 }
 
+// SNI pool for googleusercontent.com domains.
+// These are whitelisted domains dedicated to Google's user-content CDN (e.g. Google Photos, Blogger, web cache).
+// We MUST use these for script.googleusercontent.com to keep within the correct domain group at GFE.
+var googleUserContentSNIs = []string{
+	"lh3.googleusercontent.com",
+	"lh4.googleusercontent.com",
+	"lh5.googleusercontent.com",
+	"lh6.googleusercontent.com",
+	"avatars.googleusercontent.com",
+	"themes.googleusercontent.com",
+	"webcache.googleusercontent.com",
+}
+
 // googleOwnedSuffixes defines domains that belong to Google infrastructure.
 var googleOwnedSuffixes = []string{
 	".google.com",
@@ -95,18 +108,24 @@ func NewH2Transport() *H2Transport {
 			sni := host
 			fakeSNI := false
 
-			// CRITICAL: Google GHS IPs (216.239.x.x) do not natively serve or
-			// perform TLS handshakes for script.googleusercontent.com. If we connect
-			// with the real SNI (script.googleusercontent.com), GHS returns a cert
-			// mismatch or falls back to serving a generic Google Docs landing page
-			// (which results in a 405 error).
+			// CRITICAL: Google GFE/GHS edges check if the TLS SNI root domain matches the HTTP Host root domain.
+			// Faking the SNI of script.googleusercontent.com (which ends in .googleusercontent.com) using a
+			// .google.com whitelisted SNI (like maps.google.com) causes GFE to route the request to generic GSuite/Docs
+			// landing pages (which results in a 405 error).
 			//
-			// To bypass this, we MUST use a fake SNI (e.g. www.google.com) for BOTH
-			// script.google.com and script.googleusercontent.com redirect targets.
-			if isGASDomain(host) {
+			// To bypass this, we MUST use a fake SNI that belongs to the same domain group (root domain):
+			//   - For script.google.com (.google.com) → use googleSNIs (e.g. www.google.com, maps.google.com)
+			//   - For script.googleusercontent.com (.googleusercontent.com) → use googleUserContentSNIs (e.g. lh3.googleusercontent.com)
+			if host == "script.google.com" {
 				sni = RandomSNI()
 				fakeSNI = true
 				log.Printf("[tls] Domain Fronting (GAS): target=%s → fake SNI=%s", host, sni)
+			} else if host == "script.googleusercontent.com" || strings.HasSuffix(host, ".googleusercontent.com") {
+				// DO NOT fake SNI for googleusercontent.com to avoid GFE routing to wrong backend pools (e.g. photos, blogger)
+				// which rejects POST requests with 405 Method Not Allowed.
+				sni = host
+				fakeSNI = false
+				log.Printf("[tls] Real SNI (GAS): target=%s → SNI=%s", host, sni)
 			} else if isGoogleOwned(host) && !strings.HasSuffix(host, ".googleusercontent.com") {
 				sni = RandomSNI()
 				fakeSNI = true
@@ -216,4 +235,9 @@ func (h *H2Transport) Close() {
 // RandomSNI returns a random Google domain for SNI rotation.
 func RandomSNI() string {
 	return googleSNIs[rand.Intn(len(googleSNIs))]
+}
+
+// RandomUserContentSNI returns a random googleusercontent.com domain for SNI rotation.
+func RandomUserContentSNI() string {
+	return googleUserContentSNIs[rand.Intn(len(googleUserContentSNIs))]
 }

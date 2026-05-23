@@ -167,16 +167,28 @@ func (r *GASRelay) relayHTTP1(conn *tls.Conn, host, path string, body []byte, de
 	}
 
 	// Step 1.3: Manually craft the HTTP/1.1 request as raw bytes
-	header := fmt.Sprintf(
-		"POST %s HTTP/1.1\r\n"+
-			"Host: %s\r\n"+
-			"Content-Type: text/plain; charset=utf-8\r\n"+
-			"Content-Length: %d\r\n"+
-			"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n"+
-			"Connection: keep-alive\r\n"+
-			"\r\n",
-		path, host, len(body),
-	)
+	var header string
+	if depth == 0 {
+		header = fmt.Sprintf(
+			"POST %s HTTP/1.1\r\n"+
+				"Host: %s\r\n"+
+				"Content-Type: text/plain; charset=utf-8\r\n"+
+				"Content-Length: %d\r\n"+
+				"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n"+
+				"Connection: keep-alive\r\n"+
+				"\r\n",
+			path, host, len(body),
+		)
+	} else {
+		header = fmt.Sprintf(
+			"GET %s HTTP/1.1\r\n"+
+				"Host: %s\r\n"+
+				"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n"+
+				"Connection: keep-alive\r\n"+
+				"\r\n",
+			path, host,
+		)
+	}
 
 	// Set write deadline
 	conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
@@ -186,8 +198,8 @@ func (r *GASRelay) relayHTTP1(conn *tls.Conn, host, path string, body []byte, de
 		return nil, fmt.Errorf("writing HTTP header: %w", err)
 	}
 
-	// Write the body
-	if len(body) > 0 {
+	// Write the body (only for the initial POST request)
+	if depth == 0 && len(body) > 0 {
 		if _, err := conn.Write(body); err != nil {
 			return nil, fmt.Errorf("writing HTTP body: %w", err)
 		}

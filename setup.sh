@@ -362,21 +362,21 @@ run_client() {
 
     echo ""
     echo -e "  ${DIM}┌──────────────────────────────────────────────┐${RESET}"
-    echo -e "  ${DIM}│${RESET}  ${GREEN}SOCKS5 Proxy${RESET}    →  ${WHITE}127.0.0.1:1080${RESET}          ${DIM}│${RESET}"
+    echo -e "  ${DIM}│${RESET}  ${GREEN}SOCKS5 Proxy${RESET}    →  ${WHITE}127.0.0.1:4046${RESET}          ${DIM}│${RESET}"
     echo -e "  ${DIM}│${RESET}  ${GREEN}GAS Nodes${RESET}       →  ${WHITE}$(echo "$GAS_URLS" | tr ',' '\n' | wc -l | tr -d ' ') scripts${RESET}                   ${DIM}│${RESET}"
     echo -e "  ${DIM}│${RESET}  ${GREEN}IP Scanner${RESET}      →  ${WHITE}Active (5 min)${RESET}          ${DIM}│${RESET}"
     echo -e "  ${DIM}│${RESET}  ${GREEN}Reverse Polling${RESET} →  ${WHITE}3 parallel PULLs${RESET}        ${DIM}│${RESET}"
     echo -e "  ${DIM}│${RESET}  ${GREEN}Padding${RESET}         →  ${WHITE}16–512 bytes random${RESET}     ${DIM}│${RESET}"
     echo -e "  ${DIM}│${RESET}                                              ${DIM}│${RESET}"
     echo -e "  ${DIM}│${RESET}  ${YELLOW}Configure your browser SOCKS5 proxy to:${RESET}     ${DIM}│${RESET}"
-    echo -e "  ${DIM}│${RESET}  ${WHITE}  127.0.0.1:1080${RESET}                            ${DIM}│${RESET}"
+    echo -e "  ${DIM}│${RESET}  ${WHITE}  127.0.0.1:4046${RESET}                            ${DIM}│${RESET}"
     echo -e "  ${DIM}└──────────────────────────────────────────────┘${RESET}"
     echo ""
 
     exec "$binary" \
         -psk "$RELAY_PSK" \
         -gas-urls "$GAS_URLS" \
-        -listen ":1080"
+        -listen ":4046"
 }
 
 run_server() {
@@ -452,7 +452,7 @@ interactive_setup() {
     echo -e "  ${WHITE}5.${RESET} Start the local proxy:"
     echo -e "     ${CYAN}./setup.sh --run${RESET}"
     echo ""
-    echo -e "  ${WHITE}6.${RESET} Configure your browser SOCKS5 proxy to ${BOLD}127.0.0.1:1080${RESET}"
+    echo -e "  ${WHITE}6.${RESET} Configure your browser SOCKS5 proxy to ${BOLD}127.0.0.1:4046${RESET}"
     echo ""
     separator
 }
