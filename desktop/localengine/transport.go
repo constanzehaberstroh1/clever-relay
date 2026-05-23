@@ -86,33 +86,41 @@ func NewH2Transport() *H2Transport {
 		//   → HTTP Host header: script.google.com     (only Google sees)
 		// ═══════════════════════════════════════════════════════════════
 		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			// Step 1: Open a raw TCP socket to a clean Google IP
 			rawConn, err := h2t.dialWithCleanIP(ctx, network, addr)
 			if err != nil {
 				return nil, err
 			}
 
 			host, _, _ := net.SplitHostPort(addr)
-			sni := host // Default: use the original domain for non-Google traffic
+			sni := host
+			fakeSNI := false
 
-			// Step 2: Apply SNI Rotation for GAS and Google-owned domains
-			if isGASDomain(host) || isGoogleOwned(host) {
+			// CRITICAL: Google GHS IPs (216.239.x.x) do not natively serve or
+			// perform TLS handshakes for script.googleusercontent.com. If we connect
+			// with the real SNI (script.googleusercontent.com), GHS returns a cert
+			// mismatch or falls back to serving a generic Google Docs landing page
+			// (which results in a 405 error).
+			//
+			// To bypass this, we MUST use a fake SNI (e.g. www.google.com) for BOTH
+			// script.google.com and script.googleusercontent.com redirect targets.
+			if isGASDomain(host) {
 				sni = RandomSNI()
-				log.Printf("[tls] Domain Fronting: target=%s → fake SNI=%s", host, sni)
+				fakeSNI = true
+				log.Printf("[tls] Domain Fronting (GAS): target=%s → fake SNI=%s", host, sni)
+			} else if isGoogleOwned(host) && !strings.HasSuffix(host, ".googleusercontent.com") {
+				sni = RandomSNI()
+				fakeSNI = true
+				log.Printf("[tls] Domain Fronting (Google): target=%s → fake SNI=%s", host, sni)
 			}
 
-			// Step 3: TLS configuration with fake SNI + HTTP/2 ALPN
 			tlsConfig := &tls.Config{
 				ServerName:         sni,
-				InsecureSkipVerify: true, // Required for domain fronting (cert is for SNI domain, not target)
+				InsecureSkipVerify: fakeSNI,
 				MinVersion:         tls.VersionTLS12,
 				NextProtos:         []string{"h2", "http/1.1"},
 			}
 
-			// Step 4: Wrap the raw TCP socket with TLS
 			tlsConn := tls.Client(rawConn, tlsConfig)
-
-			// Step 5: Manual handshake with context deadline
 			if err := tlsConn.HandshakeContext(ctx); err != nil {
 				rawConn.Close()
 				return nil, err

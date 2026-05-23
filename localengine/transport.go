@@ -113,25 +113,40 @@ func NewH2Transport() *H2Transport {
 			}
 
 			host, _, _ := net.SplitHostPort(addr)
-			sni := host // Default: use the original domain for non-Google traffic
+			sni := host // Default: use the real hostname as SNI
+			fakeSNI := false
 
-			// Step 2: Apply SNI Rotation for GAS and Google-owned domains
-			if isGASDomain(host) || isGoogleOwned(host) {
+			// Step 2: Apply SNI Rotation — for script.google.com and script.googleusercontent.com
+			//
+			// CRITICAL: Google GHS IPs (216.239.x.x) do not natively serve or
+			// perform TLS handshakes for script.googleusercontent.com. If we connect
+			// with the real SNI (script.googleusercontent.com), GHS returns a cert
+			// mismatch or falls back to serving a generic Google Docs landing page
+			// (which results in a 405 error).
+			//
+			// To bypass this, we MUST use a fake SNI (e.g. www.google.com) for BOTH
+			// script.google.com and script.googleusercontent.com redirect targets.
+			// This forces GHS to accept the connection and route based entirely
+			// on the HTTP Host header.
+			if isGASDomain(host) {
 				sni = RandomSNI()
-				log.Printf("[tls] Domain Fronting: target=%s → fake SNI=%s", host, sni)
+				fakeSNI = true
+				log.Printf("[tls] Domain Fronting (GAS): target=%s → fake SNI=%s", host, sni)
+			} else if isGoogleOwned(host) && !strings.HasSuffix(host, ".googleusercontent.com") {
+				sni = RandomSNI()
+				fakeSNI = true
+				log.Printf("[tls] Domain Fronting (Google): target=%s → fake SNI=%s", host, sni)
 			}
 
-			// Step 3: TLS configuration with fake SNI + HTTP/2 ALPN
+			// Step 3: TLS configuration with ALPN for HTTP/2
 			tlsConfig := &tls.Config{
-				ServerName: sni, // DPI sees this domain, not the real target
-				// We MUST skip verification because we're sending a fake SNI.
-				// Google returns a cert for the SNI domain (e.g., www.google.com),
-				// but Go expects a cert for the URL domain (script.google.com).
-				// This is inherent to Domain Fronting — the cert mismatch is expected.
-				InsecureSkipVerify: true,
+				ServerName: sni,
+				// Only skip cert verification when using a fake SNI.
+				// When SNI matches the real host, normal verification works
+				// (Google returns valid certs for *.google.com and *.googleusercontent.com).
+				InsecureSkipVerify: fakeSNI,
 				MinVersion:         tls.VersionTLS12,
-				// ALPN: negotiate HTTP/2 so multiplexing works
-				NextProtos: []string{"h2", "http/1.1"},
+				NextProtos:         []string{"h2", "http/1.1"},
 			}
 
 			// Step 4: Wrap the raw TCP socket with TLS
